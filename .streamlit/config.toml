@@ -1,0 +1,11 @@
+[theme]
+# Apple iOS style primary blue
+primaryColor = "#007AFF"
+# Light grayish-white Apple system background synchronized with CSS to prevent flash
+backgroundColor = "#f0f4fd"
+# Pure white cards
+secondaryBackgroundColor = "#FFFFFF"
+# Apple text color (Off-black)
+textColor = "#1D1D1F"
+# Apple system font natively maps to these standard sans serifs
+font = "sans serif"
