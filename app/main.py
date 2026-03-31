@@ -15,14 +15,17 @@ apply_apple_theme()
 st.title("🍎 NYC Restaurant Survival Guide")
 st.markdown("""
 ### Welcome to the Ultimate NYC Dining ML Dashboard!
-Navigating the New York City restaurant scene can be overwhelming. This multidimensional dashboard helps you answer two critical questions:
-1. **Find by Vibe:** Use our *Semantic Search* (powered by HuggingFace Transformer embeddings) to find restaurants that match your exact culinary and atmospheric desires.
-2. **Health Risk Predictor:** Use our *Custom PyTorch MLP* perfectly trained from scratch to predict whether a restaurant is statistically likely to maintain an 'A' health grade, based on historical DOHMH inspection patterns.
-3. **Explore the Latent Landscape:** Visualize high-dimensional restaurant features compressed into a sleek 2D mathematical map via our *Deep Autoencoder*.
-4. **Geospatial Intelligence:** Interactively explore real geographical distributions, 3D Hexagon density heatmaps, and neighborhood "Safe Zones" overlaid on the beautiful NYC map.
+Navigating the New York City restaurant scene can be overwhelming. This multidimensional dashboard leverages five machine learning tools to help you explore, predict, and discover hidden patterns across 27,000+ NYC restaurants:
 
-👈 **Use the sidebar** to navigate between the different ML tools!
+1. **🔍 Semantic Vibe Search:** Use our *Transformer-based NLP engine* to find restaurants that match your exact culinary and atmospheric desires via cosine similarity in a 384-dimensional embedding space.
+2. **🧪 ML Action Sandbox:** Use our *Custom PyTorch MLP* (trained from scratch via gradient descent) to predict health grades and explore counterfactual "what-if" scenarios in real-time.
+3. **🌌 Latent Topography:** Visualize high-dimensional restaurant features compressed into a 2D map via our *Deep Autoencoder*, revealing unsupervised cluster structure.
+4. **📍 Geospatial GIS:** Interactively explore geographic distributions with 3D hexagonal density heatmaps and multi-feature scatter maps across NYC's five boroughs.
+5. **📊 PCA Embedding Explorer:** Apply *Principal Component Analysis* to Transformer and Autoencoder embeddings, filter by borough, and run *k-means clustering* to identify the densest restaurant groups and their shared characteristics.
+
+👈 **Use the sidebar** to navigate between the five ML tools!
 
 ---
-*Created for CSCI-UA 473 Machine Learning (NYU, Spring 2026).*
+*CSCI-UA 473 · Fundamentals of Machine Learning · New York University · Spring 2026*
+*Built by Hollan Yuan*
 """)

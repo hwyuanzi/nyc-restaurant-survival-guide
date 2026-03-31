@@ -47,6 +47,16 @@ Explore **2,500 simulated restaurants** across NYC's 5 boroughs on a 3D hexagona
 | **Libraries** | PyDeck (`HexagonLayer` + `ScatterplotLayer`), Plotly Express (`scatter_mapbox`) |
 | **Course Topics** | Data visualization, feature engineering |
 
+### 📊 PCA Embedding Explorer
+Apply **Principal Component Analysis** to embeddings from both the Transformer (384-D) and Autoencoder intermediate layer (32-D). Visualize whether learned representations naturally group by geographic location (e.g., Manhattan vs. Brooklyn), and apply **k-means clustering** to identify the most dense clusters and their underlying characteristics.
+
+| Component | Detail |
+|---|---|
+| **Algorithm** | `sklearn.decomposition.PCA` (384/32→2) and `sklearn.cluster.KMeans` on embeddings |
+| **Visualizations** | Interactive scatter plots with geographic filters and density-based cluster analysis |
+| **Course Topics** | Week 6 (PCA), Week 7 (k-means clustering), Week 4 (Embeddings) |
+| **Implementation** | `app/pages/5_📊_PCA_Embedding_Explorer.py` — multi-model PCA, density clustering, and geographic filtering |
+
 ---
 
 ## Repository Structure
@@ -60,7 +70,8 @@ nyc-restaurant-survival-guide/
 │       ├── 1_🔍_Semantic_Search.py     # NLP vibe search
 │       ├── 2_🧪_ML_Action_Sandbox.py   # Interactive health prediction
 │       ├── 3_🌌_Latent_Topography.py   # Autoencoder visualization
-│       └── 4_📍_Dynamic_GIS_Map.py     # Geospatial intelligence
+│       ├── 4_📍_Dynamic_GIS_Map.py     # Geospatial intelligence
+│       └── 5_📊_PCA_Embedding_Explorer.py # Multi-model PCA, k-means density, geographic filtering
 ├── models/                     # PyTorch model implementations
 │   ├── custom_mlp.py           # From-scratch MLP + counterfactual engine
 │   └── autoencoder.py          # Deep Autoencoder for dimensionality reduction
@@ -73,6 +84,7 @@ nyc-restaurant-survival-guide/
 │   ├── test_custom_mlp.py      # MLP forward shape + training convergence
 │   ├── test_autoencoder.py     # AE forward shape + loss reduction + latent output
 │   └── test_semantic_search.py # Embedding shape + L2 norm + semantic relevance
+├── .gitignore                  # Git ignore rules for caches and data
 ├── .streamlit/config.toml      # Streamlit theme configuration
 ├── Pipfile                     # Pipenv dependency lock
 ├── requirements.txt            # Pip dependency list
@@ -138,18 +150,19 @@ The app runs with synthetic data by default — downloading real data is optiona
 pipenv run pytest tests/ -v
 ```
 
-Expected output: **9 tests, all passing** — covering the MLP, Autoencoder, and Semantic Search model.
+Expected output: **10 tests, all passing** — covering the MLP (2), Autoencoder (4), and Semantic Search (4) models.
 
 ---
 
 ## How to Use the Dashboard
 
 1. **Open the app** in your browser (default: `http://localhost:8501`).
-2. **Use the sidebar** to navigate between the four ML tools.
+2. **Use the sidebar** to navigate between the five ML tools.
 3. **Semantic Search:** Type a natural-language description → get ranked restaurant matches.
 4. **ML Sandbox:** Select a restaurant → adjust sliders → watch the neural network prediction and radar chart update live.
 5. **Latent Topography:** Change the color mapping dropdown → hover over clusters to inspect feature distributions.
 6. **GIS Map:** Rotate the 3D map with `Shift + Drag` → zoom into specific neighborhoods → switch color metrics.
+7. **PCA Explorer:** Switch models → apply geographic filters (e.g., Manhattan) → run k-means to find dense clusters and extract their shared characteristics.
 
 ---
 

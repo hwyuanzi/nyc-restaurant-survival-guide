@@ -36,6 +36,20 @@ class RestaurantAutoencoder(nn.Module):
         with torch.no_grad():
             return self.encoder(x)
 
+    def get_intermediate_embedding(self, x):
+        """
+        Extract the 32-dimensional intermediate representation from the encoder.
+        This is the output after encoder layers [Linear(6→64), ReLU, Linear(64→32)]
+        but BEFORE the final compression to latent_dim (2D).
+        Useful for PCA analysis on a richer, higher-dimensional learned representation.
+        """
+        self.eval()
+        with torch.no_grad():
+            h = self.encoder[0](x)   # Linear(input_dim → 64)
+            h = self.encoder[1](h)   # ReLU
+            h = self.encoder[2](h)   # Linear(64 → 32)
+            return h
+
 def train_autoencoder(model, X_train, epochs=50, lr=0.001):
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)

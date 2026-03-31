@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+Pipfile.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data artifacts (large files — download via script)
+data/raw_dohmh.csv
+data/train.csv
+data/test.csv
+
+# Pytest
+.pytest_cache/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Jupyter (if any)
+.ipynb_checkpoints/
+
+# Gemini agent metadata
+.gemini/

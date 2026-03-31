@@ -42,3 +42,12 @@ def test_get_latent_space():
     latent = model.get_latent_space(X)
     assert latent.shape == (20, 2)
     assert not latent.requires_grad, "Latent output should be detached"
+
+
+def test_get_intermediate_embedding():
+    """Test that the 32-D intermediate embedding extraction works for PCA analysis."""
+    model = RestaurantAutoencoder(input_dim=6, latent_dim=2)
+    X = torch.randn(20, 6)
+    intermediate = model.get_intermediate_embedding(X)
+    assert intermediate.shape == (20, 32), "Intermediate embedding should be (batch, 32)"
+    assert not intermediate.requires_grad, "Intermediate output should be detached"
