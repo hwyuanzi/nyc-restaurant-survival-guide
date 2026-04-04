@@ -27,6 +27,9 @@ Thumbs.db
 data/raw_dohmh.csv
 data/train.csv
 data/test.csv
+data/meta_train.csv
+data/meta_test.csv
+data/feature_config.json
 
 # Pytest
 .pytest_cache/
