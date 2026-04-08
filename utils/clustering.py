@@ -6,16 +6,15 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans, MiniBatchKMeans
+from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
-
-from models.kmeans_scratch import KMeansScratch
-from models.pca_scratch import PCAScratch
 
 CACHE_PATH = "data/cluster_cache.parquet"
 MODEL_PATH = "data/kmeans_model.joblib"
 CACHE_TTL  = 86400  # 24 hours
-CLUSTER_SCHEMA_VERSION = 3
+CLUSTER_SCHEMA_VERSION = 2
 
 try:
     import umap
@@ -31,14 +30,6 @@ CUISINE_FAMILY_KEYWORDS = {
     "American": {"american", "burger", "chicken", "sandwich", "steak", "barbecue", "bbq"},
     "Cafe & Bakery": {"cafe", "coffee", "bakery", "dessert", "donut", "juice"},
     "Middle Eastern & African": {"middle eastern", "ethiopian", "halal", "shawarma", "falafel"},
-}
-FEATURE_LABELS = {
-    "price_tier_norm": "Price level",
-    "rating_norm": "Google rating",
-    "review_norm": "Review volume",
-    "lat_norm": "North-south location",
-    "lng_norm": "East-west location",
-    "user_affinity": "User affinity",
 }
 
 
@@ -142,73 +133,6 @@ def _assign_cluster_labels(df: pd.DataFrame):
     return df["cluster_id"].map(label_map)
 
 
-def _feature_category(feature_name):
-    if feature_name.startswith("cuisine_") or feature_name.startswith("family_"):
-        return "Cuisine"
-    if feature_name == "price_tier_norm":
-        return "Price"
-    if feature_name in {"rating_norm", "review_norm"}:
-        return "Quality"
-    if feature_name in {"lat_norm", "lng_norm"}:
-        return "Location"
-    if feature_name == "user_affinity":
-        return "Affinity"
-    return "Other"
-
-
-def _humanize_feature(feature_name):
-    if feature_name in FEATURE_LABELS:
-        return FEATURE_LABELS[feature_name]
-    if feature_name.startswith("cuisine_"):
-        return feature_name.replace("cuisine_", "").replace("_", " ").title()
-    if feature_name.startswith("family_"):
-        return feature_name.replace("family_", "").replace("_", " ").title()
-    if feature_name.startswith("tag_"):
-        return feature_name.replace("tag_", "").replace("_", " ").title()
-    return feature_name.replace("_", " ").title()
-
-
-def _component_axis_label(component, feature_columns):
-    weights = pd.Series(np.abs(component), index=feature_columns)
-    category_weights = weights.groupby([_feature_category(name) for name in feature_columns]).sum().sort_values(ascending=False)
-    primary_category = category_weights.index[0] if not category_weights.empty else "Pattern"
-    secondary_category = category_weights.index[1] if len(category_weights) > 1 else None
-
-    category_labels = {
-        "Cuisine": "Taste Profile",
-        "Price": "Price Level",
-        "Quality": "Quality & Popularity",
-        "Location": "NYC Geography",
-        "Affinity": "User Match",
-        "Other": "Mixed Factors",
-    }
-    primary_label = category_labels.get(primary_category, "Mixed Factors")
-    secondary_label = category_labels.get(secondary_category, "") if secondary_category else ""
-
-    if primary_category == "Cuisine" and secondary_category in {"Price", "Quality", "Location", "Affinity"}:
-        return f"{primary_label} vs {secondary_label}"
-    if primary_category in {"Price", "Quality", "Location", "Affinity"} and secondary_category == "Cuisine":
-        return f"{primary_label} vs Taste"
-    return primary_label
-
-
-def _component_summary(component, feature_columns):
-    loading_series = pd.Series(component, index=feature_columns)
-    top_positive = loading_series.sort_values(ascending=False).head(2)
-    top_negative = loading_series.sort_values(ascending=True).head(2)
-
-    positive_text = ", ".join(_humanize_feature(name) for name in top_positive.index if top_positive[name] > 0)
-    negative_text = ", ".join(_humanize_feature(name) for name in top_negative.index if top_negative[name] < 0)
-
-    if positive_text and negative_text:
-        return f"Leans toward {positive_text} over {negative_text}"
-    if positive_text:
-        return f"Mostly driven by {positive_text}"
-    if negative_text:
-        return f"Mostly separates against {negative_text}"
-    return "Mixed restaurant attributes"
-
-
 def build_feature_matrix(df: pd.DataFrame):
     validate_dataframe(df)
 
@@ -254,15 +178,6 @@ def build_feature_matrix(df: pd.DataFrame):
                 tag_matrix[i, j] = 1.0 if tag in tag_set else 0.0
         tag_features = tag_matrix
 
-    # Feature weighting rationale:
-    # Cuisine one-hots (×2.8) and cuisine family (×1.6) are the dominant taste signals:
-    # restaurants of the same cuisine type should cluster together first.
-    # Price (×0.9) and rating (×0.7) are secondary quality signals.
-    # Review count (×0.45) is log-scaled to reduce the influence of viral outliers.
-    # Geography (×0.2) is intentionally low-weighted: we want taste clusters,
-    # not borough clusters. StandardScaler (applied next) normalizes each feature
-    # to unit variance; the weighting above controls the relative column-count
-    # contribution before scaling, biasing K-Means toward cuisine distinctions.
     X = np.hstack([
         cuisine_dummies.values * 2.8,
         cuisine_family_dummies.values * 1.6,
@@ -331,15 +246,11 @@ def find_optimal_k(X_scaled: np.ndarray, k_range=range(4, 16)) -> int:
     for k in k_range:
         if k >= len(X_scaled):
             break
-        km = KMeansScratch(n_clusters=k, n_init=5, max_iter=100, random_state=42)
+        km = KMeans(n_clusters=k, init="k-means++", n_init=5, max_iter=100, random_state=42)
         labels = km.fit_predict(X_scaled)
         if len(set(labels)) < 2:
             continue
-        score = silhouette_score(
-            X_scaled, labels,
-            sample_size=min(1000, len(X_scaled)),
-            random_state=42,
-        )
+        score = silhouette_score(X_scaled, labels, sample_size=min(1000, len(X_scaled)), random_state=42)
         if score > best_score:
             best_score, best_k = score, k
     return best_k
@@ -348,19 +259,20 @@ def find_optimal_k(X_scaled: np.ndarray, k_range=range(4, 16)) -> int:
 def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 8):
     X, feature_columns, df = build_feature_matrix(df)
     X_aug = apply_user_weights(X, df, user_history)
-    projection_feature_columns = feature_columns + ["user_affinity"]
 
     scaler   = StandardScaler()
     X_scaled = scaler.fit_transform(X_aug)
 
+    # Use MiniBatchKMeans for large datasets
+    KMeansClass = MiniBatchKMeans if len(df) > 10000 else KMeans
     max_clusters = max(2, min(16, len(df) - 1))
     k = max(2, min(k, max_clusters))
 
-    kmeans = KMeansScratch(
+    kmeans = KMeansClass(
         n_clusters=k,
+        init="k-means++",
         n_init=10,
         max_iter=300,
-        tol=1e-4,
         random_state=42,
     )
     df = df.copy()
@@ -377,45 +289,15 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 8):
         dists[cid] = np.inf
         df.loc[idx, "cluster_id"] = int(np.argmin(dists))
 
-    # PCA 3D coordinates — implemented from scratch via thin SVD (models/pca_scratch.py)
-    pca = PCAScratch(n_components=3)
+    # PCA 3D coordinates
+    pca = PCA(n_components=3, random_state=42)
     X_pca = pca.fit_transform(X_scaled)
     df["pca_x"] = X_pca[:, 0]
     df["pca_y"] = X_pca[:, 1]
     df["pca_z"] = X_pca[:, 2]
-    pca.axis_labels_ = [
-        _component_axis_label(component, projection_feature_columns)
-        for component in pca.components_[:3]
-    ]
-    pca.component_summaries_ = [
-        _component_summary(component, projection_feature_columns)
-        for component in pca.components_[:3]
-    ]
-    pca.feature_columns_ = projection_feature_columns
-
-    # Cluster-oriented display coordinates based on centroid distances.
-    centroid_distances = kmeans.transform(X_scaled)
-    cluster_view_pca = PCAScratch(n_components=3)
-    X_cluster_view = cluster_view_pca.fit_transform(
-        StandardScaler().fit_transform(centroid_distances)
-    )
-    df["cluster_view_x"] = X_cluster_view[:, 0]
-    df["cluster_view_y"] = X_cluster_view[:, 1]
-    df["cluster_view_z"] = X_cluster_view[:, 2]
 
     # Auto-label clusters with unique descriptive names
     df["cluster_label"] = _assign_cluster_labels(df)
-
-    # Silhouette score — stored on kmeans for display in the UI pages
-    try:
-        kmeans.silhouette_score_ = float(
-            silhouette_score(
-                X_scaled, df["cluster_id"].values,
-                sample_size=min(1000, len(df)), random_state=42,
-            )
-        )
-    except Exception:
-        kmeans.silhouette_score_ = None
 
     # User affinity score (last column of X_aug)
     df["user_affinity_score"] = X_aug[:, -1]
@@ -458,8 +340,7 @@ def get_clustered_data(df: pd.DataFrame, user_history: dict, k: int = 8, force: 
         cached_df, cached_kmeans, cached_scaler, cached_pca, cached_signature = load_cache()
         cached_labels = cached_df.groupby("cluster_id")["cluster_label"].first()
         has_duplicate_labels = cached_labels.duplicated().any()
-        has_cluster_view = {"cluster_view_x", "cluster_view_y", "cluster_view_z"}.issubset(cached_df.columns)
-        if cached_signature == signature and not has_duplicate_labels and has_cluster_view:
+        if cached_signature == signature and not has_duplicate_labels:
             return cached_df, cached_kmeans, cached_scaler, cached_pca
     result_df, kmeans, scaler, pca = run_kmeans(df, user_history, k)
     save_cache(result_df, kmeans, scaler, pca, signature)
