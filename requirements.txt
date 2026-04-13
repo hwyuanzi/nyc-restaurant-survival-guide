@@ -1,6 +1,7 @@
 streamlit
 torch
 transformers
+sentence-transformers
 pandas
 numpy
 scikit-learn
@@ -10,3 +11,6 @@ matplotlib
 seaborn
 pytest
 pydeck
+joblib
+pyarrow
+python-dotenv
