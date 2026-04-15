@@ -11,7 +11,7 @@ import plotly.express as px
 from app.ui_utils import apply_apple_theme
 from utils.clustering import get_clustered_data
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
-from utils.user_profile import init_session_state, predict_user_cluster
+from utils.user_profile import init_session_state, predict_user_cluster, render_profile_sidebar, profile_to_user_history
 
 st.set_page_config(page_title="PCA Embedding Explorer", page_icon="📊", layout="wide")
 apply_apple_theme()
@@ -24,7 +24,12 @@ CLUSTER_HEX = [
 ]
 
 st.title("📊 PCA Embedding Explorer")
-st.markdown("Restaurants plotted in 3D taste space. The default layout emphasizes cleaner cluster separation, while the PCA summary below explains the main latent dimensions.")
+st.markdown("""
+Restaurants plotted in 3D taste space. The default layout emphasizes cleaner cluster separation. 
+
+💡 **Why do different cuisines cluster together?** 
+Clusters are formed using K-Means on a *high-dimensional* feature space. Restaurants share a cluster not just because of their cuisine, but because they have highly similar **Price Tiers, Google Ratings, Health Inspection Grades, and Operational Patterns**. For example, an expensive French bistro and a high-end Japanese Omakase might cluster together as "Premium Quality Spots" despite serving different food.
+""")
 
 if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
     with st.spinner("Loading prepared restaurant data..."):
@@ -35,12 +40,14 @@ if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
     st.session_state["raw_df"] = runtime_df
 
 raw_df       = st.session_state["raw_df"]
-user_history = st.session_state["user_history"]
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
+    profile = render_profile_sidebar()
+    st.session_state["user_history"] = profile_to_user_history(profile, raw_df)
+    st.markdown("---")
     st.markdown("### Clustering Controls")
-    k = st.slider("Number of Clusters (K)", 4, 16, st.session_state["optimal_k"])
+    k = st.slider("Number of Clusters (K)", 4, 16, st.session_state.get("optimal_k", 8))
 
     if st.button("🔄 Re-run Clustering"):
         st.session_state["clustered_df"] = None
@@ -52,6 +59,18 @@ with st.sidebar:
     highlight_mode = st.toggle("Highlight my cluster only", value=False)
     show_user      = st.toggle("Show my position", value=True)
     show_axes      = st.toggle("Show axis labels", value=True)
+
+    st.markdown("---")
+    st.markdown("### Data Filters")
+    st.caption("Isolate specific categories to see where they land in the latent space.")
+    
+    all_boros = sorted([str(b) for b in raw_df["boro"].dropna().unique() if str(b).strip()])
+    filter_boros = st.multiselect("Filter by Borough", all_boros, default=[])
+    
+    all_cuisines = sorted([str(c) for c in raw_df["cuisine_type"].dropna().unique() if str(c).strip()])
+    filter_cuisines = st.multiselect("Filter by Cuisine", all_cuisines, default=[])
+
+user_history = st.session_state["user_history"]
 
 # ── Run clustering ────────────────────────────────────────────────────────────
 with st.spinner("Running K-Means clustering..."):
@@ -86,6 +105,12 @@ plot_df = cdf.dropna(subset=projection_columns).copy()
 plot_df["plot_x"] = plot_df[projection_columns[0]]
 plot_df["plot_y"] = plot_df[projection_columns[1]]
 plot_df["plot_z"] = plot_df[projection_columns[2]]
+plot_df["grade"] = plot_df.get("grade", pd.Series(["N/A"] * len(plot_df))).fillna("N/A")
+
+if filter_boros:
+    plot_df = plot_df[plot_df["boro"].isin(filter_boros)]
+if filter_cuisines:
+    plot_df = plot_df[plot_df["cuisine_type"].isin(filter_cuisines)]
 
 if size_by == "Review count":
     raw_size = pd.to_numeric(plot_df["review_count"], errors="coerce").fillna(0)
@@ -122,10 +147,11 @@ if color_by == "Cluster":
             ),
             hovertemplate=(
                 "<b>%{customdata[0]}</b><br>"
-                "%{customdata[1]} · %{customdata[2]}<br>"
-                "⭐ %{customdata[3]}<extra>%{fullData.name}</extra>"
+                "🍽️ %{customdata[1]} · 💰 %{customdata[2]}<br>"
+                "⭐ %{customdata[3]} · 🏥 Grade %{customdata[4]}<br>"
+                "<extra>%{fullData.name}</extra>"
             ),
-            customdata=subset[["name", "cuisine_type", "price_tier", "avg_rating"]].values,
+            customdata=subset[["name", "cuisine_type", "price_tier", "avg_rating", "grade"]].values,
         ))
 else:
     color_col = {
@@ -134,23 +160,48 @@ else:
         "Rating":       "avg_rating",
     }.get(color_by, "cluster_id")
 
-    fig.add_trace(go.Scatter3d(
-        x=plot_df["plot_x"], y=plot_df["plot_y"], z=plot_df["plot_z"],
-        mode="markers",
-        marker=dict(
-            size=plot_df["dot_size"],
-            color=pd.Categorical(plot_df[color_col]).codes if plot_df[color_col].dtype == object else plot_df[color_col],
-            colorscale="Viridis",
-            opacity=0.8,
-            line=dict(width=0),
-        ),
-        hovertemplate=(
-            "<b>%{customdata[0]}</b><br>"
-            "%{customdata[1]} · %{customdata[2]}<br>"
-            "⭐ %{customdata[3]}<extra></extra>"
-        ),
-        customdata=plot_df[["name", "cuisine_type", "price_tier", "avg_rating"]].values,
-    ))
+    if plot_df[color_col].dtype == object or color_by == "Cuisine type":
+        unique_vals = sorted(plot_df[color_col].dropna().unique())
+        for i, val in enumerate(unique_vals):
+            subset = plot_df[plot_df[color_col] == val]
+            fig.add_trace(go.Scatter3d(
+                x=subset["plot_x"], y=subset["plot_y"], z=subset["plot_z"],
+                mode="markers",
+                name=str(val),
+                marker=dict(
+                    size=subset["dot_size"],
+                    color=CLUSTER_HEX[i % len(CLUSTER_HEX)],
+                    opacity=0.8,
+                    line=dict(width=0),
+                ),
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "🍽️ %{customdata[1]} · 💰 %{customdata[2]}<br>"
+                    "⭐ %{customdata[3]} · 🏥 Grade %{customdata[4]}<br>"
+                    "<extra></extra>"
+                ),
+                customdata=subset[["name", "cuisine_type", "price_tier", "avg_rating", "grade"]].values,
+            ))
+    else:
+        fig.add_trace(go.Scatter3d(
+            x=plot_df["plot_x"], y=plot_df["plot_y"], z=plot_df["plot_z"],
+            mode="markers",
+            marker=dict(
+                size=plot_df["dot_size"],
+                color=plot_df[color_col],
+                colorscale="Viridis",
+                colorbar=dict(title=color_by, x=-0.1),
+                opacity=0.8,
+                line=dict(width=0),
+            ),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "🍽️ %{customdata[1]} · 💰 %{customdata[2]}<br>"
+                "⭐ %{customdata[3]} · 🏥 Grade %{customdata[4]}<br>"
+                "<extra></extra>"
+            ),
+            customdata=plot_df[["name", "cuisine_type", "price_tier", "avg_rating", "grade"]].values,
+        ))
 
 # User position marker
 if show_user and predicted_cluster != -1:
@@ -166,7 +217,10 @@ if show_user and predicted_cluster != -1:
 
 if show_axes:
     if projection_mode == "Principal Components":
-        x_title, y_title, z_title = ["PC1", "PC2", "PC3"]
+        _ax = pca_axis_labels if pca_axis_labels else []
+        x_title = f"PC1: {_ax[0]}" if len(_ax) > 0 else "PC1"
+        y_title = f"PC2: {_ax[1]}" if len(_ax) > 1 else "PC2"
+        z_title = f"PC3: {_ax[2]}" if len(_ax) > 2 else "PC3"
     else:
         x_title, y_title, z_title = ["Cluster Axis 1", "Cluster Axis 2", "Cluster Axis 3"]
 else:
@@ -199,8 +253,9 @@ fig.update_layout(
     margin=dict(l=0, r=0, t=40, b=60),
 )
 
+chart_key = f"pca_chart_{len(plot_df)}_{k}_{color_by}_{projection_mode}"
 try:
-    event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="pca_chart")
+    event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key=chart_key)
     if event and event.selection and event.selection.points:
         idx  = event.selection.points[0].get("point_index", 0)
         rest = plot_df.iloc[idx]
@@ -212,7 +267,20 @@ try:
         c3.metric("Cluster", rest.get("cluster_label", "—"))
         st.caption(f"📍 {rest.get('address', '')}")
 except Exception:
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+
+# ── Clustering quality metrics ────────────────────────────────────────────────
+st.markdown("---")
+_sil = getattr(kmeans, "silhouette_score_", None)
+_inertia = getattr(kmeans, "inertia_", None)
+_m1, _m2, _m3 = st.columns(3)
+if _sil is not None:
+    _m1.metric("Silhouette Score", f"{_sil:.3f}",
+               help="Ranges −1 to 1. Values > 0.2 indicate reasonable separation; > 0.5 is strong.")
+if _inertia is not None:
+    _m2.metric("Inertia (WCSS)", f"{_inertia:,.0f}",
+               help="Sum of squared distances from each point to its assigned centroid (lower = tighter clusters).")
+_m3.metric("K (clusters)", k)
 
 # ── PCA component interpretation ─────────────────────────────────────────────
 if pca_model is not None:
@@ -224,6 +292,47 @@ if pca_model is not None:
             st.metric(f"PC{idx + 1}", pca_axis_labels[idx] if idx < len(pca_axis_labels) else f"PC{idx + 1}")
             if idx < len(pca_component_summaries) and pca_component_summaries[idx]:
                 st.caption(pca_component_summaries[idx])
+
+# ── Feature loadings per component ───────────────────────────────────────────
+_feature_cols = getattr(pca_model, "feature_columns_", None) if pca_model is not None else None
+if _feature_cols and pca_model is not None and pca_model.components_ is not None:
+    st.markdown("---")
+    st.subheader("Top Feature Loadings per Component")
+    st.caption(
+        "Each bar shows how strongly a raw feature drives the component. "
+        "Blue = positive loading (high feature value → high PC score); "
+        "red = negative loading."
+    )
+    _n_pcs = min(3, len(pca_model.components_))
+    _load_cols = st.columns(_n_pcs)
+    for _pc_idx, _load_col in enumerate(_load_cols):
+        _loadings = pd.Series(pca_model.components_[_pc_idx], index=_feature_cols)
+        _top_idx = _loadings.abs().nlargest(8).index
+        _top_loadings = _loadings[_top_idx]
+        _pc_label = pca_axis_labels[_pc_idx] if _pc_idx < len(pca_axis_labels) else f"PC{_pc_idx+1}"
+        _colors = ["#6c8fff" if v >= 0 else "#ff6b8a" for v in _top_loadings.values]
+        _short_names = [
+            n.replace("cuisine_", "").replace("family_", "").replace("_norm", "").replace("_", " ").title()
+            for n in _top_idx
+        ]
+        _load_fig = go.Figure(go.Bar(
+            x=_top_loadings.values,
+            y=_short_names,
+            orientation="h",
+            marker_color=_colors,
+        ))
+        _load_fig.update_layout(
+            title=f"PC{_pc_idx+1}: {_pc_label}",
+            height=280,
+            margin=dict(l=0, r=0, t=40, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#e0e0f0", size=11),
+            xaxis=dict(gridcolor="#2a2a38", zeroline=True, zerolinecolor="#4a4a58"),
+            yaxis=dict(gridcolor="#2a2a38"),
+        )
+        with _load_col:
+            st.plotly_chart(_load_fig, use_container_width=True)
 
 # ── Explained variance bar ────────────────────────────────────────────────────
 if st.session_state["pca_model"] is not None:
