@@ -5,11 +5,18 @@ import torch
 import plotly.express as px
 
 from models.autoencoder import RestaurantAutoencoder, train_autoencoder
+from utils.user_profile import init_session_state, render_profile_sidebar
 
 st.set_page_config(page_title="Restaurant Landscape", page_icon="🗺️", layout="wide")
 
 from app.ui_utils import apply_apple_theme
 apply_apple_theme()
+
+init_session_state()
+
+with st.sidebar:
+    profile = render_profile_sidebar()
+    st.markdown("---")
 
 st.title("🌌 Autoencoder Latent Topography")
 
