@@ -23,6 +23,49 @@ CLUSTER_HEX = [
 st.title("📊 PCA Embedding Explorer")
 st.markdown("Restaurants plotted in 3D taste space. The default layout emphasizes cleaner cluster separation, while the PCA summary below explains the main latent dimensions.")
 
+with st.expander("How clustering works"):
+    st.markdown(
+        """
+        We cluster restaurants in a reduced latent space instead of clustering directly on raw columns.
+
+        1. **TF-IDF text features**
+        We turn restaurant text like summaries, tags, and descriptions into a sparse feature matrix so the model can capture cuisine, vibe, and menu language.
+
+        2. **TruncatedSVD**
+        We reduce those sparse text features into dense semantic factors. This keeps the strongest restaurant-style patterns while removing a lot of noise.
+
+        3. **Structured restaurant signals**
+        We add practical numeric features like price tier, rating, review volume, health score, and user affinity so the clusters reflect both semantics and quality.
+
+        4. **Standard scaling**
+        We normalize the merged features so no one numeric input overwhelms the others.
+
+        5. **PCA for clustering space**
+        We apply PCA to the combined dense matrix and cluster in that reduced space. This gives K-Means a cleaner, denoised representation than the full raw matrix.
+
+        6. **K-Means with multiple seeds**
+        We try several K-Means initializations and keep the solution with the best silhouette separation, which makes clusters more stable and distinct.
+
+        7. **PCA 3D for visualization**
+        The 3D chart is a display projection of the learned cluster space, so the plot is for interpretation, while the clustering itself uses the fuller reduced representation.
+        """
+    )
+
+with st.expander("How optimal K works"):
+    st.markdown(
+        """
+        The **Find Optimal K** button tests several cluster counts and recommends the one with the best **silhouette score**.
+
+        1. We build the same reduced clustering space used by the real clustering pipeline.
+        2. We test K values from 4 to 15.
+        3. For each K, we run K-Means and compute the silhouette score.
+        4. The silhouette score rewards clusters that are both tight internally and well separated from each other.
+        5. We pick the K with the highest score.
+
+        It is a strong heuristic, not a hard truth. Sometimes the most mathematically separated K is not the most intuitive visually, so it is best used as a recommendation.
+        """
+    )
+
 if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
     with st.spinner("Loading prepared restaurant data..."):
         _, _, runtime_df, _ = load_runtime_assets(DEFAULT_SEARCH_SAMPLE_SIZE)
@@ -38,6 +81,17 @@ user_history = st.session_state["user_history"]
 with st.sidebar:
     st.markdown("### Clustering Controls")
     k = st.slider("Number of Clusters (K)", 4, 16, st.session_state["optimal_k"])
+
+    if st.button("🔍 Find Optimal K"):
+        with st.spinner("Computing silhouette scores..."):
+            from utils.clustering import build_feature_matrix, apply_user_weights, prepare_clustering_space, find_optimal_k
+            X, _, _ = build_feature_matrix(raw_df)
+            X_aug = apply_user_weights(X, raw_df, user_history)
+            _, X_cluster, _ = prepare_clustering_space(X_aug, fit=True)
+            best_k = find_optimal_k(X_cluster)
+            st.session_state["optimal_k"] = best_k
+            st.success(f"Optimal K = {best_k}")
+            k = best_k
 
     if st.button("🔄 Re-run Clustering"):
         st.session_state["clustered_df"] = None

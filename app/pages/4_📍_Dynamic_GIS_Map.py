@@ -58,13 +58,11 @@ with st.sidebar:
 
     if st.button("🔍 Find Optimal K"):
         with st.spinner("Computing silhouette scores..."):
-            from utils.clustering import build_feature_matrix, apply_user_weights
-            from sklearn.preprocessing import StandardScaler
+            from utils.clustering import build_feature_matrix, apply_user_weights, prepare_clustering_space
             X, _, _ = build_feature_matrix(raw_df)
             X_aug   = apply_user_weights(X, raw_df, user_history)
-            scaler  = StandardScaler()
-            X_sc    = scaler.fit_transform(X_aug)
-            best_k  = find_optimal_k(X_sc)
+            _, X_cluster, _ = prepare_clustering_space(X_aug, fit=True)
+            best_k  = find_optimal_k(X_cluster)
             st.session_state["optimal_k"] = best_k
             st.success(f"Optimal K = {best_k}")
             k = best_k

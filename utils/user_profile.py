@@ -331,15 +331,15 @@ def predict_user_cluster(user_history, df_clustered, kmeans, scaler):
         return int(cluster_votes.index[0])
 
     try:
-        from utils.clustering import apply_user_weights, build_feature_matrix
+        from utils.clustering import apply_user_weights, build_feature_matrix, prepare_clustering_space
 
         X, _, clustered = build_feature_matrix(df_clustered)
         X_aug = apply_user_weights(X, clustered, user_history)
         visited_mask = clustered["restaurant_id"].isin(user_history["visited_ids"])
         visited_vecs = X_aug[visited_mask.values]
         user_vec = visited_vecs.mean(axis=0).reshape(1, -1)
-        user_vec_scaled = scaler.transform(user_vec)
-        return int(kmeans.predict(user_vec_scaled)[0])
+        _, user_vec_cluster, _ = prepare_clustering_space(user_vec, scaler=scaler, fit=False)
+        return int(kmeans.predict(user_vec_cluster)[0])
     except Exception:
         return -1
 

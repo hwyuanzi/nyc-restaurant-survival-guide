@@ -28,6 +28,56 @@ def build_restaurant_option(row):
     return f"{row.get('name', 'Unknown')} · {row.get('cuisine_type', 'Unknown')} · {area}"
 
 
+def format_match_percent(value):
+    numeric_value = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric_value):
+        return "—"
+    clipped = float(np.clip(numeric_value, 0, 1))
+    return f"{round(clipped * 100):d}%"
+
+
+def describe_cluster_traits(cluster_df):
+    if cluster_df.empty:
+        return "Mixed restaurant attributes"
+
+    parts = []
+    borough_counts = cluster_df["boro"].fillna("").astype(str).value_counts()
+    if not borough_counts.empty:
+        top_borough = borough_counts.index[0]
+        borough_share = borough_counts.iloc[0] / max(len(cluster_df), 1)
+        if top_borough and borough_share >= 0.4:
+            parts.append(f"{top_borough}-leaning")
+
+    avg_rating = pd.to_numeric(cluster_df.get("avg_rating"), errors="coerce").mean()
+    if pd.notna(avg_rating):
+        if avg_rating >= 4.5:
+            parts.append("top rated")
+        elif avg_rating >= 4.1:
+            parts.append("well rated")
+        elif avg_rating >= 3.7:
+            parts.append("reliable")
+
+    avg_price = pd.to_numeric(cluster_df.get("price_tier"), errors="coerce").mean()
+    if pd.notna(avg_price):
+        if avg_price <= 1.5:
+            parts.append("budget friendly")
+        elif avg_price >= 3.0:
+            parts.append("upscale")
+        else:
+            parts.append("mid-range")
+
+    avg_reviews = pd.to_numeric(cluster_df.get("review_count"), errors="coerce").mean()
+    if pd.notna(avg_reviews):
+        if avg_reviews >= 400:
+            parts.append("crowd favorites")
+        elif avg_reviews >= 150:
+            parts.append("local staples")
+        else:
+            parts.append("hidden gems")
+
+    return ", ".join(dict.fromkeys(parts)) if parts else "Mixed restaurant attributes"
+
+
 def load_visit_entries(profile, df):
     restaurant_lookup = df.drop_duplicates(subset=["restaurant_id"]).set_index("restaurant_id", drop=False)
     entries_by_restaurant = {}
@@ -227,9 +277,9 @@ else:
     cluster_label    = cdf[cdf["cluster_id"] == predicted_cluster]["cluster_label"].iloc[0]
     cluster_df       = cdf[cdf["cluster_id"] == predicted_cluster]
     n_in_cluster     = len(cluster_df)
-    top_cuisines     = cluster_df["cuisine_type"].value_counts().head(3).index.tolist()
     avg_cluster_r    = cluster_df["avg_rating"].mean()
     avg_cluster_p    = cluster_df["price_tier"].mean()
+    cluster_traits   = describe_cluster_traits(cluster_df)
 
     st.success(f"🎯 You're a **{cluster_label}** explorer — {n_in_cluster} restaurants match your taste profile.")
 
@@ -239,7 +289,7 @@ else:
     c3.metric("Avg Rating", f"{avg_cluster_r:.2f} ★")
     c4.metric("Avg Price", format_price_tier(avg_cluster_p, escape_dollars=True))
 
-    st.markdown(f"**Top cuisines in your cluster:** {', '.join(top_cuisines)}")
+    st.markdown(f"**Cluster traits:** {cluster_traits}")
 
     unvisited = cluster_df[
         ~cluster_df["restaurant_id"].isin(user_history.get("visited_ids", []))
@@ -267,7 +317,7 @@ else:
         top_recs["price_tier"] = top_recs["price_tier"].apply(format_price_tier)
     if "user_affinity_score" in top_recs.columns:
         top_recs["user_affinity_score"] = top_recs["user_affinity_score"].apply(
-            lambda x: f"{x:.3f}"
+            format_match_percent
         )
 
     top_recs.columns = [c.replace("_", " ").title() for c in top_recs.columns]
@@ -282,7 +332,7 @@ else:
             col1.metric("Cuisine", row.get("cuisine_type", "—"))
             col2.metric("Rating", f"{row.get('avg_rating', 0):.2f} ★")
             col3.metric("Price", format_price_tier(row.get("price_tier"), escape_dollars=True))
-            col4.metric("Affinity", f"{pd.to_numeric(row.get('user_affinity_score'), errors='coerce'):.3f}" if pd.notna(pd.to_numeric(row.get("user_affinity_score"), errors="coerce")) else "—")
+            col4.metric("Affinity", format_match_percent(row.get("user_affinity_score")))
             st.caption(f"📍 {row.get('address', row.get('boro', ''))}")
             st.caption(f"Cluster: {row.get('cluster_label', '—')}")
             if row.get("g_maps_url"):
@@ -296,7 +346,7 @@ cluster_summary = cdf.groupby(["cluster_id", "cluster_label"]).agg(
     Count=("restaurant_id", "count"),
     Avg_Rating=("avg_rating", "mean"),
     Avg_Price=("price_tier", "mean"),
-    Top_Cuisine=("cuisine_type", lambda x: x.value_counts().index[0]),
+    Top_Borough=("boro", lambda x: x.fillna("").value_counts().index[0] if not x.fillna("").empty else "NYC"),
 ).reset_index()
 
 cluster_summary["Avg_Rating"] = cluster_summary["Avg_Rating"].round(2)
