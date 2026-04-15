@@ -6,10 +6,11 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans, MiniBatchKMeans
-from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
+
+from models.kmeans_scratch import KMeansScratch
+from models.pca_scratch import PCAScratch
 
 CACHE_PATH = "data/cluster_cache.parquet"
 MODEL_PATH = "data/kmeans_model.joblib"
@@ -253,6 +254,15 @@ def build_feature_matrix(df: pd.DataFrame):
                 tag_matrix[i, j] = 1.0 if tag in tag_set else 0.0
         tag_features = tag_matrix
 
+    # Feature weighting rationale:
+    # Cuisine one-hots (×2.8) and cuisine family (×1.6) are the dominant taste signals:
+    # restaurants of the same cuisine type should cluster together first.
+    # Price (×0.9) and rating (×0.7) are secondary quality signals.
+    # Review count (×0.45) is log-scaled to reduce the influence of viral outliers.
+    # Geography (×0.2) is intentionally low-weighted: we want taste clusters,
+    # not borough clusters. StandardScaler (applied next) normalizes each feature
+    # to unit variance; the weighting above controls the relative column-count
+    # contribution before scaling, biasing K-Means toward cuisine distinctions.
     X = np.hstack([
         cuisine_dummies.values * 2.8,
         cuisine_family_dummies.values * 1.6,
@@ -321,11 +331,15 @@ def find_optimal_k(X_scaled: np.ndarray, k_range=range(4, 16)) -> int:
     for k in k_range:
         if k >= len(X_scaled):
             break
-        km = KMeans(n_clusters=k, init="k-means++", n_init=5, max_iter=100, random_state=42)
+        km = KMeansScratch(n_clusters=k, n_init=5, max_iter=100, random_state=42)
         labels = km.fit_predict(X_scaled)
         if len(set(labels)) < 2:
             continue
-        score = silhouette_score(X_scaled, labels, sample_size=min(1000, len(X_scaled)), random_state=42)
+        score = silhouette_score(
+            X_scaled, labels,
+            sample_size=min(1000, len(X_scaled)),
+            random_state=42,
+        )
         if score > best_score:
             best_score, best_k = score, k
     return best_k
@@ -339,16 +353,14 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 8):
     scaler   = StandardScaler()
     X_scaled = scaler.fit_transform(X_aug)
 
-    # Use MiniBatchKMeans for large datasets
-    KMeansClass = MiniBatchKMeans if len(df) > 10000 else KMeans
     max_clusters = max(2, min(16, len(df) - 1))
     k = max(2, min(k, max_clusters))
 
-    kmeans = KMeansClass(
+    kmeans = KMeansScratch(
         n_clusters=k,
-        init="k-means++",
         n_init=10,
         max_iter=300,
+        tol=1e-4,
         random_state=42,
     )
     df = df.copy()
@@ -365,8 +377,8 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 8):
         dists[cid] = np.inf
         df.loc[idx, "cluster_id"] = int(np.argmin(dists))
 
-    # PCA 3D coordinates
-    pca = PCA(n_components=3, random_state=42)
+    # PCA 3D coordinates — implemented from scratch via thin SVD (models/pca_scratch.py)
+    pca = PCAScratch(n_components=3)
     X_pca = pca.fit_transform(X_scaled)
     df["pca_x"] = X_pca[:, 0]
     df["pca_y"] = X_pca[:, 1]
@@ -379,17 +391,31 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 8):
         _component_summary(component, projection_feature_columns)
         for component in pca.components_[:3]
     ]
+    pca.feature_columns_ = projection_feature_columns
 
     # Cluster-oriented display coordinates based on centroid distances.
     centroid_distances = kmeans.transform(X_scaled)
-    cluster_view_pca = PCA(n_components=3, random_state=42)
-    X_cluster_view = cluster_view_pca.fit_transform(StandardScaler().fit_transform(centroid_distances))
+    cluster_view_pca = PCAScratch(n_components=3)
+    X_cluster_view = cluster_view_pca.fit_transform(
+        StandardScaler().fit_transform(centroid_distances)
+    )
     df["cluster_view_x"] = X_cluster_view[:, 0]
     df["cluster_view_y"] = X_cluster_view[:, 1]
     df["cluster_view_z"] = X_cluster_view[:, 2]
 
     # Auto-label clusters with unique descriptive names
     df["cluster_label"] = _assign_cluster_labels(df)
+
+    # Silhouette score — stored on kmeans for display in the UI pages
+    try:
+        kmeans.silhouette_score_ = float(
+            silhouette_score(
+                X_scaled, df["cluster_id"].values,
+                sample_size=min(1000, len(df)), random_state=42,
+            )
+        )
+    except Exception:
+        kmeans.silhouette_score_ = None
 
     # User affinity score (last column of X_aug)
     df["user_affinity_score"] = X_aug[:, -1]

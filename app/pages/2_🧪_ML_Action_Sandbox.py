@@ -6,10 +6,17 @@ import plotly.graph_objects as go
 import random
 
 from models.custom_mlp import CustomMLP, train_mlp
+from utils.user_profile import init_session_state, render_profile_sidebar
 
 st.set_page_config(page_title="Health Analyzer Sandbox", page_icon="🧪", layout="wide")
 from app.ui_utils import apply_apple_theme
 apply_apple_theme()
+
+init_session_state()
+
+with st.sidebar:
+    profile = render_profile_sidebar()
+    st.markdown("---")
 
 st.title("🧪 Full-Stack Entity ML Sandbox")
 

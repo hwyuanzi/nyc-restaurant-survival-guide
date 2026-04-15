@@ -1,0 +1,53 @@
+{
+  "guest": {
+    "id": "guest",
+    "name": "Guest",
+    "survey_completed": true,
+    "favorite_cuisines": [
+      "American",
+      "Caribbean"
+    ],
+    "preferred_boroughs": [
+      "Manhattan"
+    ],
+    "budget": "$$",
+    "min_grade": "B",
+    "spice_tolerance": 4,
+    "adventurousness": 3,
+    "favorite_vibes": [],
+    "likes": [],
+    "created_at": "2026-04-14T19:18:03",
+    "updated_at": "2026-04-14T22:44:24"
+  },
+  "hollan": {
+    "id": "hollan",
+    "name": "Hollan",
+    "survey_completed": true,
+    "favorite_cuisines": [
+      "Italian"
+    ],
+    "preferred_boroughs": [],
+    "budget": "$$",
+    "min_grade": "B",
+    "spice_tolerance": 3,
+    "adventurousness": 3,
+    "favorite_vibes": [],
+    "likes": [
+      {
+        "restaurant_id": "50151969",
+        "camis": "50151969",
+        "g_place_id": "ChIJzRA7agBZwokRbSxOyEGFG5U",
+        "dba": "Din Tai Fung",
+        "cuisine": "Thai",
+        "boro": "Manhattan",
+        "grade": "A",
+        "score": 13,
+        "rating": 5.0,
+        "source": "semantic_search",
+        "liked_at": "2026-04-14T21:24:12"
+      }
+    ],
+    "created_at": "2026-04-14T21:23:23",
+    "updated_at": "2026-04-14T22:56:27"
+  }
+}

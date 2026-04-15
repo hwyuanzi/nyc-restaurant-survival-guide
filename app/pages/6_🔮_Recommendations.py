@@ -191,13 +191,13 @@ with st.sidebar:
 
         profile["likes"] = list(updated_likes_by_restaurant.values())
         profile = upsert_profile(profile)
-        st.session_state["user_history"] = profile_to_user_history(profile)
+        st.session_state["user_history"] = profile_to_user_history(profile, raw_df)
         st.session_state["clustered_df"] = None
         st.success("Visited history saved. Recommendations updated.")
         st.rerun()
 
     st.markdown("---")
-    k = st.slider("Number of Clusters (K)", 4, 16, st.session_state["optimal_k"])
+    k = st.slider("Number of Clusters (K)", 4, 16, st.session_state.get("optimal_k", 8))
 
     if st.button("🔄 Re-run Clustering"):
         st.session_state["clustered_df"] = None

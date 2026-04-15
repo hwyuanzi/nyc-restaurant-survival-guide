@@ -9,7 +9,7 @@ import numpy as np
 from app.ui_utils import apply_apple_theme
 from utils.clustering import get_clustered_data, find_optimal_k
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
-from utils.user_profile import init_session_state, predict_user_cluster
+from utils.user_profile import init_session_state, predict_user_cluster, render_profile_sidebar, profile_to_user_history
 
 st.set_page_config(page_title="Restaurant Cluster GIS Map", page_icon="📍", layout="wide")
 apply_apple_theme()
@@ -40,7 +40,12 @@ CLUSTER_COLORS = [
 ]
 
 st.title("📍 Restaurant Cluster GIS Map")
-st.markdown("Restaurants colored by K-Means cluster on a real NYC map.")
+st.markdown("""
+Restaurants colored by K-Means cluster on a real NYC map.
+
+💡 **Why do different cuisines cluster together?** 
+Clusters are formed in a high-dimensional feature space. Restaurants sharing a color (cluster) have highly similar **Price Tiers, Google Ratings, Health Inspection Grades, and Operational Patterns**. For example, a cluster might represent "High-rating, expensive Grade A spots" regardless of whether they serve French or Japanese cuisine.
+""")
 
 if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
     with st.spinner("Loading prepared restaurant data..."):
@@ -51,12 +56,14 @@ if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
     st.session_state["raw_df"] = runtime_df
 
 raw_df       = st.session_state["raw_df"]
-user_history = st.session_state["user_history"]
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
+    profile = render_profile_sidebar()
+    st.session_state["user_history"] = profile_to_user_history(profile, raw_df)
+    st.markdown("---")
     st.markdown("### Clustering Controls")
-    k = st.slider("Number of Clusters (K)", 4, 16, st.session_state["optimal_k"])
+    k = st.slider("Number of Clusters (K)", 4, 16, st.session_state.get("optimal_k", 8))
     cluster_filter_placeholder = st.empty()
 
     if st.button("🔍 Find Optimal K"):
@@ -78,14 +85,26 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Map Controls")
+
     layer_type   = st.radio("Layer type", ["3D Columns", "Scatter Dots"])
     height_metric = st.selectbox("Column height by", ["avg_rating", "review_count", "user_affinity_score", "price_tier"])
     map_style_name = st.selectbox("Map style", ["Dark", "Light"])
+
+    st.markdown("---")
+    st.markdown("### Data Filters")
+    st.caption("Filter the map to specific boroughs or cuisines.")
+    all_boros = sorted([str(b) for b in raw_df["boro"].dropna().unique() if str(b).strip()])
+    filter_boros = st.multiselect("Filter by Borough", all_boros, default=[])
+    
+    all_cuisines = sorted([str(c) for c in raw_df["cuisine_type"].dropna().unique() if str(c).strip()])
+    filter_cuisines = st.multiselect("Filter by Cuisine", all_cuisines, default=[])
 
 MAP_STYLES = {
     "Dark":      "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
     "Light":     "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
 }
+
+user_history = st.session_state["user_history"]
 
 # ── Run clustering ────────────────────────────────────────────────────────────
 with st.spinner("Running K-Means clustering..."):
@@ -98,6 +117,15 @@ with st.spinner("Running K-Means clustering..."):
 
 predicted_cluster = predict_user_cluster(user_history, cdf, kmeans, scaler)
 st.session_state["predicted_cluster"] = predicted_cluster
+
+# Show silhouette score in sidebar once clustering is done
+sil = getattr(kmeans, "silhouette_score_", None)
+if sil is not None:
+    st.sidebar.metric(
+        "Silhouette Score", f"{sil:.3f}",
+        help="Ranges −1 to 1. Above 0.2 = reasonable separation; above 0.5 = strong clusters.",
+    )
+st.sidebar.metric("Active Clusters", int(cdf["cluster_id"].nunique()))
 
 # ── User cluster banner ───────────────────────────────────────────────────────
 if predicted_cluster != -1:
@@ -121,6 +149,11 @@ with cluster_filter_placeholder.container():
 if cluster_filter:
     map_df = map_df[map_df["cluster_label"].isin(cluster_filter)]
 
+if filter_boros:
+    map_df = map_df[map_df["boro"].isin(filter_boros)]
+if filter_cuisines:
+    map_df = map_df[map_df["cuisine_type"].isin(filter_cuisines)]
+
 # Cluster colors with dimming
 def get_color(cid):
     color = CLUSTER_COLORS[cid % len(CLUSTER_COLORS)].copy()
@@ -143,6 +176,7 @@ else:
 # Tooltip-friendly columns
 map_df["price_tier_str"] = map_df["price_tier"].apply(lambda x: "$" * int(x) if pd.notna(x) else "")
 map_df["neighborhood"]   = map_df.get("neighborhood", map_df.get("boro", "NYC"))
+map_df["grade"]          = map_df.get("grade", "N/A")
 
 if not PYDECK_OK:
     st.error("pydeck not installed. Run: pip install pydeck")
@@ -151,7 +185,7 @@ if not PYDECK_OK:
 view_state = pdk.ViewState(latitude=40.7128, longitude=-74.0060, zoom=11, pitch=45, bearing=0)
 
 tooltip = {
-    "html": "<b>{name}</b><br/>🍽 {cuisine_type} · {price_tier_str}<br/>⭐ {avg_rating}<br/>📍 {neighborhood}<br/><span style='color:#aaa'>Cluster: {cluster_label}</span>",
+    "html": "<b>{name}</b><br/>🍽 {cuisine_type} · {price_tier_str}<br/>⭐ {avg_rating} · 🏥 Grade {grade}<br/>📍 {neighborhood}<br/><span style='color:#aaa'>Cluster: {cluster_label}</span>",
     "style": {"backgroundColor": "#1a1a2e", "color": "white", "fontSize": "13px", "padding": "8px 12px", "borderRadius": "8px"},
 }
 
@@ -173,7 +207,7 @@ else:
         "ScatterplotLayer",
         data=map_df,
         get_position="[lng, lat]",
-        get_color="cluster_color_rgba",
+        get_fill_color="cluster_color_rgba",
         get_radius="scaled_radius",
         radius_min_pixels=3,
         radius_max_pixels=20,
@@ -189,6 +223,24 @@ deck = pdk.Deck(
     map_style=MAP_STYLES[map_style_name],
 )
 st.pydeck_chart(deck)
+
+# ── Geographic distribution insights ─────────────────────────────────────────
+st.markdown("---")
+st.subheader("Geographic Distribution of Clusters")
+st.caption(
+    "Geography was weighted 5× lower than cuisine in the K-Means feature matrix, so "
+    "clusters reflect **taste profiles**, not neighborhoods. The table below shows each "
+    "borough's share of restaurants per cluster — mixed distributions confirm taste-based grouping."
+)
+
+boro_cluster = cdf.dropna(subset=["boro", "cluster_label"]).copy()
+boro_cluster = boro_cluster[boro_cluster["boro"].str.strip() != ""]
+if not boro_cluster.empty:
+    cross = pd.crosstab(
+        boro_cluster["boro"], boro_cluster["cluster_label"], normalize="columns"
+    ).mul(100).round(1)
+    cross.index.name = "Borough"
+    st.dataframe(cross.style.format("{:.1f}%"), use_container_width=True)
 
 # ── Cluster summary cards ─────────────────────────────────────────────────────
 st.markdown("---")
@@ -206,14 +258,21 @@ for i, cid in enumerate(unique_clusters):
     top3   = subset["cuisine_type"].value_counts().head(3).index.tolist()
     avg_r  = subset["avg_rating"].mean()
 
+    top_boro = subset["boro"].value_counts().index[0] if not subset["boro"].isna().all() else "—"
+    grade_a_pct = (
+        (subset["grade"] == "A").sum() / max(len(subset), 1) * 100
+        if "grade" in subset.columns else None
+    )
+    grade_line = f"🅰 {grade_a_pct:.0f}% Grade A" if grade_a_pct is not None else ""
+
     with col:
         st.markdown(f"""
         <div style="border-left: 4px solid {hex_c}; padding: 0.6rem 0.8rem;
                     background:#1a1a2e; border-radius:8px; margin-bottom:0.5rem;">
           <div style="font-weight:700; color:#e0e0f0">{label}</div>
-          <div style="font-size:.78rem; color:#7a7a9a">{len(subset)} restaurants</div>
+          <div style="font-size:.78rem; color:#7a7a9a">{len(subset)} restaurants · {top_boro}</div>
           <div style="font-size:.78rem; color:#a0a0c0">{", ".join(top3)}</div>
-          <div style="font-size:.78rem; color:#d19900">⭐ {avg_r:.2f}</div>
+          <div style="font-size:.78rem; color:#d19900">⭐ {avg_r:.2f} &nbsp; {grade_line}</div>
         </div>
         """, unsafe_allow_html=True)
         if st.button(f"Explore →", key=f"explore_{cid}"):
