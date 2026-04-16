@@ -26,6 +26,7 @@ CLUSTER_HEX = [
 st.title("📊 PCA Embedding Explorer")
 st.markdown("""
 Restaurants plotted in 3D taste space. The default layout emphasizes cleaner cluster separation. 
+Clustering is trained in the reduced clustering space; t-SNE is available as a visualization-only layout.
 
 💡 **Why do different cuisines cluster together?** 
 Clusters are formed using K-Means on a *high-dimensional* feature space. Restaurants share a cluster not just because of their cuisine, but because they have highly similar **Price Tiers, Google Ratings, Health Inspection Grades, and Operational Patterns**. For example, an expensive French bistro and a high-end Japanese Omakase might cluster together as "Premium Quality Spots" despite serving different food.
@@ -96,12 +97,20 @@ pca_component_summaries = getattr(pca_model, "component_summaries_", ["", "", ""
 with st.sidebar:
     projection_mode = st.selectbox(
         "Layout",
-        ["Cleaner Cluster View", "Principal Components"],
+        ["Cleaner Cluster View", "Principal Components", "t-SNE (visualization only)"],
         index=0,
     )
 
-projection_columns = ["cluster_view_x", "cluster_view_y", "cluster_view_z"] if projection_mode == "Cleaner Cluster View" else ["pca_x", "pca_y", "pca_z"]
+projection_columns = (
+    ["cluster_view_x", "cluster_view_y", "cluster_view_z"]
+    if projection_mode == "Cleaner Cluster View"
+    else ["pca_x", "pca_y", "pca_z"]
+    if projection_mode == "Principal Components"
+    else ["tsne_x", "tsne_y", "tsne_z"]
+)
 plot_df = cdf.dropna(subset=projection_columns).copy()
+if projection_mode == "t-SNE (visualization only)" and plot_df.empty:
+    st.info("t-SNE layout is disabled for very large datasets to keep the app responsive. Try another layout.")
 plot_df["plot_x"] = plot_df[projection_columns[0]]
 plot_df["plot_y"] = plot_df[projection_columns[1]]
 plot_df["plot_z"] = plot_df[projection_columns[2]]
@@ -221,6 +230,8 @@ if show_axes:
         x_title = f"PC1: {_ax[0]}" if len(_ax) > 0 else "PC1"
         y_title = f"PC2: {_ax[1]}" if len(_ax) > 1 else "PC2"
         z_title = f"PC3: {_ax[2]}" if len(_ax) > 2 else "PC3"
+    elif projection_mode == "t-SNE (visualization only)":
+        x_title, y_title, z_title = ["t-SNE 1", "t-SNE 2", "t-SNE 3"]
     else:
         x_title, y_title, z_title = ["Cluster Axis 1", "Cluster Axis 2", "Cluster Axis 3"]
 else:
