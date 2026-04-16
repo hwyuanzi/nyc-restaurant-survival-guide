@@ -96,6 +96,7 @@ with st.sidebar:
     boro_filter = st.selectbox("Borough", ["All", "Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"])
     grade_filter = st.selectbox("Health Grade", ["All", "A", "B", "C"])
     min_rating = st.slider("Min Google Rating", 0.0, 5.0, 3.5, 0.5)
+    min_match = st.slider("Minimum Match", 20, 85, 45, 5, format="%d%%") / 100
     top_k = st.slider("Results to show", 3, 20, 8)
 
 st.title("🔎 Semantic Restaurant Search")
@@ -181,10 +182,11 @@ results = semantic_search(
     grade_filter=grade_filter,
     min_rating=min_rating,
     profile=profile,
+    min_match=min_match,
 )
 
 if results.empty:
-    st.info("No results found. Try adjusting your filters or rephrasing your query.")
+    st.info("No strong matches found. Try lowering the minimum match, adjusting filters, or rephrasing your query.")
 else:
     st.success(f"Found {len(results)} matches for *{query}*")
     for rank, (_, row) in enumerate(results.iterrows(), start=1):

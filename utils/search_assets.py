@@ -5,13 +5,13 @@ import streamlit as st
 
 from utils.data import load_nyc_base_safe
 from utils.google_places import get_enriched_restaurants, get_google_api_key
-from utils.search import build_description, get_embeddings
+from utils.search import build_description, get_embeddings, neighborhood_from_zipcode
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 CACHE_DIR = DATA_DIR / "cache"
 DEFAULT_SEARCH_SAMPLE_SIZE = 750
 BASE_DATASET_LIMIT = 8000
-PREPARED_DATASET_VERSION = 2
+PREPARED_DATASET_VERSION = 3
 
 
 def _prepared_df_path(sample_size):
@@ -77,6 +77,7 @@ def load_prepared_search_assets(sample_size=DEFAULT_SEARCH_SAMPLE_SIZE, force_re
     if available_required_columns:
         prepared_df = prepared_df.dropna(subset=available_required_columns).reset_index(drop=True)
 
+    prepared_df["neighborhood"] = prepared_df.get("zipcode", pd.Series([""] * len(prepared_df), index=prepared_df.index)).apply(neighborhood_from_zipcode)
     prepared_df["description"] = prepared_df.apply(build_description, axis=1)
     prepared_df.to_pickle(prepared_df_path)
     embeddings = get_embeddings(prepared_df, _embedding_cache_key(sample_size, len(prepared_df)))
@@ -107,7 +108,8 @@ def build_runtime_restaurant_df(prepared_df):
     runtime_df["price_tier"] = pd.to_numeric(runtime_df.get("g_price", 2), errors="coerce").fillna(2).clip(1, 4).astype(int)
     runtime_df["avg_rating"] = pd.to_numeric(runtime_df.get("g_rating", 3.0), errors="coerce").fillna(3.0)
     runtime_df["review_count"] = pd.to_numeric(runtime_df.get("g_reviews", 0), errors="coerce").fillna(0).astype(int)
-    runtime_df["neighborhood"] = runtime_df.get("boro", pd.Series(["NYC"] * len(runtime_df), index=runtime_df.index))
+    if "neighborhood" not in runtime_df.columns:
+        runtime_df["neighborhood"] = runtime_df.get("zipcode", pd.Series([""] * len(runtime_df), index=runtime_df.index)).apply(neighborhood_from_zipcode)
     return runtime_df
 
 
