@@ -21,7 +21,7 @@ CLUSTER_HEX = [
 ]
 
 st.title("📊 PCA Embedding Explorer")
-st.markdown("Restaurants plotted in 3D taste space. The default layout emphasizes cleaner cluster separation, while the PCA summary below explains the main latent dimensions.")
+st.markdown("Restaurants plotted in 3D taste space. Clustering is trained in scaled/PCA space, while layout options below are for interpretation.")
 
 with st.expander("How clustering works"):
     st.markdown(
@@ -48,6 +48,9 @@ with st.expander("How clustering works"):
 
         7. **PCA 3D for visualization**
         The 3D chart is a display projection of the learned cluster space, so the plot is for interpretation, while the clustering itself uses the fuller reduced representation.
+
+        8. **t-SNE for optional visualization**
+        t-SNE can reveal local neighborhoods for exploration, but cluster assignment is still computed from the clustering space above (not from t-SNE coordinates).
         """
     )
 
@@ -128,12 +131,20 @@ pca_component_summaries = getattr(pca_model, "component_summaries_", ["", "", ""
 with st.sidebar:
     projection_mode = st.selectbox(
         "Layout",
-        ["Cleaner Cluster View", "Principal Components"],
+        ["Cleaner Cluster View", "Principal Components", "t-SNE (visualization only)"],
         index=0,
     )
 
-projection_columns = ["cluster_view_x", "cluster_view_y", "cluster_view_z"] if projection_mode == "Cleaner Cluster View" else ["pca_x", "pca_y", "pca_z"]
+projection_columns = (
+    ["cluster_view_x", "cluster_view_y", "cluster_view_z"]
+    if projection_mode == "Cleaner Cluster View"
+    else ["pca_x", "pca_y", "pca_z"]
+    if projection_mode == "Principal Components"
+    else ["tsne_x", "tsne_y", "tsne_z"]
+)
 plot_df = cdf.dropna(subset=projection_columns).copy()
+if projection_mode == "t-SNE (visualization only)" and plot_df.empty:
+    st.info("t-SNE layout is disabled for very large datasets to keep the app responsive. Try another layout.")
 plot_df["plot_x"] = plot_df[projection_columns[0]]
 plot_df["plot_y"] = plot_df[projection_columns[1]]
 plot_df["plot_z"] = plot_df[projection_columns[2]]
@@ -218,6 +229,8 @@ if show_user and predicted_cluster != -1:
 if show_axes:
     if projection_mode == "Principal Components":
         x_title, y_title, z_title = ["PC1", "PC2", "PC3"]
+    elif projection_mode == "t-SNE (visualization only)":
+        x_title, y_title, z_title = ["t-SNE 1", "t-SNE 2", "t-SNE 3"]
     else:
         x_title, y_title, z_title = ["Cluster Axis 1", "Cluster Axis 2", "Cluster Axis 3"]
 else:

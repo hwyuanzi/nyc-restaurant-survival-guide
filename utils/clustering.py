@@ -9,6 +9,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -18,6 +19,7 @@ CACHE_PATH = "data/cluster_cache.parquet"
 MODEL_PATH = "data/kmeans_model.joblib"
 CACHE_TTL  = 86400  # 24 hours
 CLUSTER_SCHEMA_VERSION = 10
+TSNE_MAX_ROWS = 3500
 
 try:
     import umap
@@ -523,6 +525,25 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 8):
     df["cluster_view_y"] = X_cluster_view[:, 1]
     df["cluster_view_z"] = X_cluster_view[:, 2]
 
+    # t-SNE 3D coordinates for visualization only.
+    if len(df) <= TSNE_MAX_ROWS:
+        tsne_perplexity = int(np.clip(max(5, len(df) // 70), 5, 45))
+        X_tsne = TSNE(
+            n_components=3,
+            perplexity=tsne_perplexity,
+            learning_rate="auto",
+            init="pca",
+            max_iter=1000,
+            random_state=42,
+        ).fit_transform(X_cluster)
+        df["tsne_x"] = X_tsne[:, 0]
+        df["tsne_y"] = X_tsne[:, 1]
+        df["tsne_z"] = X_tsne[:, 2]
+    else:
+        df["tsne_x"] = np.nan
+        df["tsne_y"] = np.nan
+        df["tsne_z"] = np.nan
+
     # Auto-label clusters with unique descriptive names
     df["cluster_label"] = _assign_cluster_labels(df)
 
@@ -569,7 +590,8 @@ def get_clustered_data(df: pd.DataFrame, user_history: dict, k: int = 8, force: 
         has_duplicate_labels = cached_labels.duplicated().any()
         has_internal_labels = cached_labels.map(_label_looks_internal).any()
         has_cluster_view = {"cluster_view_x", "cluster_view_y", "cluster_view_z"}.issubset(cached_df.columns)
-        if cached_signature == signature and not has_duplicate_labels and not has_internal_labels and has_cluster_view:
+        has_tsne_view = {"tsne_x", "tsne_y", "tsne_z"}.issubset(cached_df.columns)
+        if cached_signature == signature and not has_duplicate_labels and not has_internal_labels and has_cluster_view and has_tsne_view:
             return cached_df, cached_kmeans, cached_scaler, cached_pca
     result_df, kmeans, scaler, pca = run_kmeans(df, user_history, k)
     save_cache(result_df, kmeans, scaler, pca, signature)
