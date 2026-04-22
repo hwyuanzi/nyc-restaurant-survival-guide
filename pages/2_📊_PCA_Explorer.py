@@ -84,6 +84,8 @@ user_history = st.session_state["user_history"]
 with st.sidebar:
     st.markdown("### Clustering Controls")
     k = st.slider("Number of Clusters (K)", 4, 16, st.session_state["optimal_k"])
+    if "legacy_pca_show_k_explainer" not in st.session_state:
+        st.session_state["legacy_pca_show_k_explainer"] = False
 
     if st.button("🔍 Find Optimal K"):
         with st.spinner("Computing silhouette scores..."):
@@ -95,6 +97,28 @@ with st.sidebar:
             st.session_state["optimal_k"] = best_k
             st.success(f"Optimal K = {best_k}")
             k = best_k
+    if st.button("📘 Explain Optimal K (Deep Dive)"):
+        st.session_state["legacy_pca_show_k_explainer"] = not st.session_state["legacy_pca_show_k_explainer"]
+    if st.session_state["legacy_pca_show_k_explainer"]:
+        st.markdown(
+            """
+            **How silhouette-based K selection works**
+
+            1. Build the same clustering matrix used for final K-Means: text semantics + structured features + user affinity, then scale/reduce.
+            2. Try candidate K values from **4 to 15**.
+            3. For each restaurant `i`:
+               - `a(i)` = average distance to points in its own cluster (cohesion).
+               - `b(i)` = lowest average distance to points in any other cluster (separation).
+               - silhouette `s(i) = (b(i) - a(i)) / max(a(i), b(i))`.
+            4. Average `s(i)` across all points to get one score for that K.
+            5. Select the K with the **highest average silhouette**.
+
+            **Interpretation guide**
+            - Near **1.0**: compact, well-separated clusters.
+            - Near **0.0**: overlapping boundaries.
+            - Below **0.0**: many points likely in the wrong cluster.
+            """
+        )
 
     if st.button("🔄 Re-run Clustering"):
         st.session_state["clustered_df"] = None
@@ -102,7 +126,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Visualization Controls")
     color_by       = st.selectbox("Color by", ["Cluster", "Cuisine type", "Price tier", "Rating"])
-    size_by        = st.selectbox("Size by", ["Review count", "User affinity score", "Uniform"])
+    size_by        = st.selectbox("Size by", ["Review count", "User affinity score", "Uniform"], index=1)
     highlight_mode = st.toggle("Highlight my cluster only", value=False)
     show_user      = st.toggle("Show my position", value=True)
     show_axes      = st.toggle("Show axis labels", value=True)
@@ -158,9 +182,9 @@ else:
 
 s_min, s_max = raw_size.min(), raw_size.max()
 if s_max > s_min:
-    plot_df["dot_size"] = 3 + ((raw_size - s_min) / (s_max - s_min) * 9)
+    plot_df["dot_size"] = 2 + ((raw_size - s_min) / (s_max - s_min) * 6)
 else:
-    plot_df["dot_size"] = 5.0
+    plot_df["dot_size"] = 3.0
 
 # ── Build Plotly figure ───────────────────────────────────────────────────────
 fig = go.Figure()

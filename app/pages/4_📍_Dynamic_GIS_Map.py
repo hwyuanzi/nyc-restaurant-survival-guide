@@ -18,22 +18,22 @@ except ImportError:
     PYDECK_OK = False
 
 CLUSTER_COLORS = [
-    [108, 143, 255, 200],
-    [255, 159, 67,  200],
-    [109, 218, 127, 200],
-    [255, 107, 138, 200],
-    [185, 131, 255, 200],
-    [255, 211, 42,  200],
-    [72,  219, 251, 200],
-    [255, 99,  72,  200],
-    [52,  211, 153, 200],
-    [251, 146, 60,  200],
-    [167, 139, 250, 200],
-    [34,  211, 238, 200],
-    [248, 113, 113, 200],
-    [74,  222, 128, 200],
-    [250, 204, 21,  200],
-    [129, 140, 248, 200],
+    [108, 143, 255, 130],
+    [255, 159, 67,  130],
+    [109, 218, 127, 130],
+    [255, 107, 138, 130],
+    [185, 131, 255, 130],
+    [255, 211, 42,  130],
+    [72,  219, 251, 130],
+    [255, 99,  72,  130],
+    [52,  211, 153, 130],
+    [251, 146, 60,  130],
+    [167, 139, 250, 130],
+    [34,  211, 238, 130],
+    [248, 113, 113, 130],
+    [74,  222, 128, 130],
+    [250, 204, 21,  130],
+    [129, 140, 248, 130],
 ]
 
 st.title("📍 Restaurant Cluster GIS Map")
@@ -74,7 +74,11 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Map Controls")
     layer_type   = st.radio("Layer type", ["3D Columns", "Scatter Dots"])
-    height_metric = st.selectbox("Column height by", ["avg_rating", "review_count", "user_affinity_score", "price_tier"])
+    height_metric = st.selectbox(
+        "Column height by",
+        ["avg_rating", "review_count", "user_affinity_score", "price_tier"],
+        index=2,
+    )
     map_style_name = st.selectbox("Map style", ["Dark", "Light"])
 
 MAP_STYLES = {
@@ -120,7 +124,7 @@ if cluster_filter:
 def get_color(cid):
     color = CLUSTER_COLORS[cid % len(CLUSTER_COLORS)].copy()
     if predicted_cluster != -1 and cid != predicted_cluster:
-        return color[:3] + [60]
+        return color[:3] + [35]
     return color
 
 map_df["cluster_color_rgba"] = map_df["cluster_id"].apply(get_color)
@@ -131,7 +135,13 @@ h_col = height_metric if height_metric in map_df.columns else "avg_rating"
 h_vals = pd.to_numeric(map_df[h_col], errors="coerce").fillna(0)
 h_min, h_max = h_vals.min(), h_vals.max()
 if h_max > h_min:
-    map_df["elevation_value"] = ((h_vals - h_min) / (h_max - h_min) * 500).astype(int)
+    h_norm = (h_vals - h_min) / (h_max - h_min)
+    if h_col == "user_affinity_score":
+        # Increase contrast so mid/high affinity differences are easier to see in 3D columns.
+        h_contrast = np.clip((h_norm - 0.5) * 1.8 + 0.5, 0, 1)
+        map_df["elevation_value"] = (80 + h_contrast * 1200).astype(int)
+    else:
+        map_df["elevation_value"] = (80 + h_norm * 500).astype(int)
 else:
     map_df["elevation_value"] = 100
 
@@ -157,7 +167,7 @@ if layer_type == "3D Columns":
         get_position="[lng, lat]",
         get_elevation="elevation_value",
         elevation_scale=1,
-        radius=60,
+        radius=48,
         get_fill_color="cluster_color_rgba",
         pickable=True,
         auto_highlight=True,

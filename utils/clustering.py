@@ -18,7 +18,7 @@ from sklearn.decomposition import TruncatedSVD
 CACHE_PATH = "data/cluster_cache.parquet"
 MODEL_PATH = "data/kmeans_model.joblib"
 CACHE_TTL  = 86400  # 24 hours
-CLUSTER_SCHEMA_VERSION = 10
+CLUSTER_SCHEMA_VERSION = 12
 TSNE_MAX_ROWS = 3500
 
 try:
@@ -33,7 +33,7 @@ LABEL_BANNED_TERMS = {
     "google", "rating", "reviews", "health", "inspection", "grade", "score", "address", "great",
     "good", "best", "serves", "serving", "dining", "delicious", "brooklyn", "manhattan", "queens",
     "bronx", "staten", "island", "casual", "dinner", "lunch", "breakfast", "cozy", "lively", "late",
-    "night", "fresh", "hearty", "counter",
+    "night", "fresh", "hearty", "counter", "price", "level", "based",
 }
 FEATURE_LABELS = {
     "semantic_latent_1": "Semantic style",
@@ -155,13 +155,11 @@ def _health_descriptor(score_value, grade_value):
 
 
 def _fallback_cluster_label(cluster_df: pd.DataFrame):
-    theme_desc = _cluster_theme_label(cluster_df)
-    price_desc = _price_descriptor(pd.to_numeric(cluster_df["price_tier"], errors="coerce").mean())
-    rating_desc = _rating_descriptor(pd.to_numeric(cluster_df["avg_rating"], errors="coerce").mean())
-
-    if theme_desc:
-        return f"{theme_desc} {rating_desc}"
-    return f"{price_desc} {rating_desc}"
+    cuisine_counts = cluster_df["cuisine_type"].fillna("").astype(str).str.strip()
+    cuisine_counts = cuisine_counts[cuisine_counts != ""].value_counts()
+    if cuisine_counts.empty:
+        return "Mixed Cuisine"
+    return f"{cuisine_counts.index[0]} Cuisine"
 
 
 def _label_looks_internal(label):
@@ -169,30 +167,27 @@ def _label_looks_internal(label):
     return not text or bool(re.match(r"^(cluster\s*\d+|\d+\b)", text, flags=re.IGNORECASE))
 
 
+def _canonical_label_key(label: str):
+    text = str(label or "").strip().lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if text in {"level", "price level"}:
+        return "price level"
+    return text
+
+
 def _cluster_label_candidates(cluster_df: pd.DataFrame):
-    theme_desc = _cluster_theme_label(cluster_df)
-    price_desc = _price_descriptor(pd.to_numeric(cluster_df["price_tier"], errors="coerce").mean())
-    rating_desc = _rating_descriptor(pd.to_numeric(cluster_df["avg_rating"], errors="coerce").mean())
-    review_desc = _review_descriptor(pd.to_numeric(cluster_df["review_count"], errors="coerce").mean())
-    dominant_grade = ""
-    if "grade" in cluster_df.columns:
-        grade_mode = cluster_df["grade"].dropna().astype(str)
-        if not grade_mode.empty:
-            dominant_grade = grade_mode.mode().iloc[0]
-    score_series = cluster_df["score"] if "score" in cluster_df.columns else pd.Series([np.nan] * len(cluster_df), index=cluster_df.index)
-    health_desc = _health_descriptor(
-        pd.to_numeric(score_series, errors="coerce").mean(),
-        dominant_grade,
-    )
+    cuisine_counts = cluster_df["cuisine_type"].fillna("").astype(str).str.strip()
+    cuisine_counts = cuisine_counts[cuisine_counts != ""].value_counts()
+    top_cuisines = cuisine_counts.index.tolist()
 
     candidates = []
-    if theme_desc:
-        candidates.append(theme_desc)
-        candidates.append(f"{theme_desc} {rating_desc}")
-        candidates.append(f"{theme_desc} {price_desc}")
-    candidates.append(f"{price_desc} {rating_desc}")
-    candidates.append(f"{rating_desc} {review_desc}")
-    candidates.append(f"{health_desc} {rating_desc}")
+    if len(top_cuisines) >= 3:
+        candidates.append(f"{top_cuisines[0]} + {top_cuisines[1]} + {top_cuisines[2]} Cuisine Mix")
+    if len(top_cuisines) >= 2:
+        candidates.append(f"{top_cuisines[0]} + {top_cuisines[1]} Cuisine Mix")
+    if len(top_cuisines) >= 1:
+        candidates.append(f"{top_cuisines[0]} Cuisine")
     candidates.append(_fallback_cluster_label(cluster_df))
     return candidates
 
@@ -200,6 +195,7 @@ def _cluster_label_candidates(cluster_df: pd.DataFrame):
 def _assign_cluster_labels(df: pd.DataFrame):
     label_map = {}
     used_labels = set()
+    used_label_keys = set()
     cluster_summaries = []
 
     for cluster_id, cluster_df in df.groupby("cluster_id"):
@@ -218,13 +214,21 @@ def _assign_cluster_labels(df: pd.DataFrame):
     for cluster_id, _, _, _, cluster_df in cluster_summaries:
         chosen_label = None
         for candidate in _cluster_label_candidates(cluster_df):
-            if candidate not in used_labels and not _label_looks_internal(candidate):
+            candidate_key = _canonical_label_key(candidate)
+            if (
+                candidate not in used_labels
+                and candidate_key not in used_label_keys
+                and not _label_looks_internal(candidate)
+            ):
                 chosen_label = candidate
                 break
         if chosen_label is None:
             chosen_label = _fallback_cluster_label(cluster_df)
+        if _canonical_label_key(chosen_label) in used_label_keys:
+            chosen_label = f"{chosen_label} Cluster {int(cluster_id) + 1}"
         label_map[cluster_id] = chosen_label
         used_labels.add(chosen_label)
+        used_label_keys.add(_canonical_label_key(chosen_label))
 
     return df["cluster_id"].map(label_map)
 
