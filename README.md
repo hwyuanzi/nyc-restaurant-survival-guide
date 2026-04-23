@@ -5,6 +5,8 @@ New York University · Spring 2026
 
 A full-stack interactive Machine Learning dashboard for exploring, searching, and predicting health outcomes of NYC restaurants. Built with **PyTorch**, **Streamlit**, **Plotly**, and **HuggingFace Transformers**.
 
+For presentation prep, rubric-facing notes, and likely TA questions, see [PRESENTATION_QA_README.md](PRESENTATION_QA_README.md).
+
 ---
 
 ## Features & Algorithms

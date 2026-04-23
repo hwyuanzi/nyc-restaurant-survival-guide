@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from utils.data import load_nyc_base_safe
+from utils.data import load_nyc_base_safe, normalize_borough_series
 from utils.google_places import get_enriched_restaurants, get_google_api_key
 from utils.search import build_description, get_embeddings, neighborhood_from_zipcode
 
@@ -102,6 +102,8 @@ def build_runtime_restaurant_df(prepared_df):
         return prepared_df.copy()
 
     runtime_df = prepared_df.copy()
+    if "boro" in runtime_df.columns:
+        runtime_df["boro"] = normalize_borough_series(runtime_df["boro"])
     runtime_df["restaurant_id"] = runtime_df["camis"].astype(str)
     runtime_df["name"] = runtime_df["dba"]
     runtime_df["lat"] = pd.to_numeric(runtime_df.get("lat", runtime_df.get("latitude")), errors="coerce")

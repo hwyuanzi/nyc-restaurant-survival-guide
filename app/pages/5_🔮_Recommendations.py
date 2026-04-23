@@ -9,17 +9,30 @@ import numpy as np
 from app.ui_utils import apply_apple_theme
 from utils.clustering import get_clustered_data
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
-from utils.user_profile import get_profile, init_session_state, predict_user_cluster, profile_to_user_history, render_profile_sidebar, upsert_profile
+from utils.user_profile import (
+    format_budget_display,
+    get_profile,
+    get_valid_borough_options,
+    get_valid_cuisine_options,
+    init_session_state,
+    predict_user_cluster,
+    profile_to_user_history,
+    render_profile_sidebar,
+    upsert_profile,
+)
 
-st.set_page_config(page_title="Cluster-Based Recommendations", page_icon="🔮", layout="wide")
+st.set_page_config(page_title="Personalized Recommendations", page_icon="🔮", layout="wide")
 apply_apple_theme()
 init_session_state()
 
 from utils.auth import require_auth
 require_auth()
 
-st.title("🔮 Cluster-Based Recommendations")
-st.markdown("Restaurants recommended based on your taste cluster profile.")
+st.title("🔮 Personalized Recommendations")
+st.markdown(
+    "Recommendations are driven primarily by your **liked restaurants** using per-liked nearest-neighbor retrieval and diversity-aware reranking. "
+    "Clusters are used for explanation and taste context, not as the sole ranking signal."
+)
 
 
 def format_price_tier(value, escape_dollars=False):
@@ -35,7 +48,7 @@ def build_restaurant_option(row):
     return f"{row.get('name', 'Unknown')} · {row.get('cuisine_type', 'Unknown')} · {area}"
 
 
-def load_visit_entries(profile, df):
+def load_liked_entries(profile, df):
     restaurant_lookup = df.drop_duplicates(subset=["restaurant_id"]).set_index("restaurant_id", drop=False)
     entries_by_restaurant = {}
 
@@ -59,6 +72,36 @@ def load_visit_entries(profile, df):
     entries.sort(key=lambda item: (item["name"].lower(), item["restaurant_id"]))
     return entries
 
+
+def persist_liked_entries(profile_id, liked_entries, raw_df):
+    profile = get_profile(profile_id=profile_id)
+    existing_likes = {
+        str(item.get("restaurant_id")): item
+        for item in profile.get("likes", [])
+        if item.get("restaurant_id")
+    }
+    updated_likes_by_restaurant = {}
+
+    for entry in liked_entries:
+        restaurant_id = entry["restaurant_id"]
+        existing_like = existing_likes.get(restaurant_id, {})
+        updated_likes_by_restaurant[restaurant_id] = {
+            **existing_like,
+            "restaurant_id": restaurant_id,
+            "dba": entry["name"],
+            "cuisine": entry["cuisine_type"],
+            "boro": entry["boro"],
+            "rating": float(entry["rating"]),
+            "source": existing_like.get("source", "manual_like_manager"),
+            "liked_at": existing_like.get("liked_at") or pd.Timestamp.now().isoformat(timespec="seconds"),
+        }
+
+    profile["likes"] = list(updated_likes_by_restaurant.values())
+    profile = upsert_profile(profile)
+    st.session_state["user_history"] = profile_to_user_history(profile, raw_df)
+    st.session_state["clustered_df"] = None
+    return profile
+
 if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
     with st.spinner("Loading prepared restaurant data..."):
         _, _, runtime_df, _ = load_runtime_assets(DEFAULT_SEARCH_SAMPLE_SIZE)
@@ -76,25 +119,42 @@ with st.sidebar:
     profile_id = profile["id"]
     profile_updated_at = profile.get("updated_at", "")
     st.markdown("---")
-    st.markdown("### Visited Restaurants")
-    st.caption("Add places you've been to so recommendations can learn from your actual history.")
+    st.markdown("### Liked Restaurants")
+    st.caption("Recommendations learn from restaurants you explicitly like. Add, filter, update, or remove them here.")
 
     session_profile_key = st.session_state.get("recommendations_history_profile_id")
     session_profile_updated_at = st.session_state.get("recommendations_history_profile_updated_at")
     if session_profile_key != profile_id or session_profile_updated_at != profile_updated_at:
         st.session_state["recommendations_history_profile_id"] = profile_id
         st.session_state["recommendations_history_profile_updated_at"] = profile_updated_at
-        st.session_state["recommendations_visit_entries"] = load_visit_entries(profile, raw_df)
+        st.session_state["recommendations_liked_entries"] = load_liked_entries(profile, raw_df)
 
-    visit_entries = st.session_state.get("recommendations_visit_entries", [])
+    liked_entries = st.session_state.get("recommendations_liked_entries", [])
 
     search_query = st.text_input(
         "Search restaurants",
         placeholder="Type a name, cuisine, borough, or address",
-        key="recommendations_restaurant_search",
+        key="recommendations_liked_restaurant_search",
     ).strip().lower()
+    search_filter_col1, search_filter_col2 = st.columns(2)
+    with search_filter_col1:
+        add_boro_filter = st.selectbox(
+            "Add-from borough",
+            ["All"] + get_valid_borough_options(raw_df),
+            key="recommendations_add_boro_filter",
+        )
+    with search_filter_col2:
+        add_cuisine_filter = st.selectbox(
+            "Add-from cuisine",
+            ["All"] + get_valid_cuisine_options(raw_df),
+            key="recommendations_add_cuisine_filter",
+        )
 
     search_df = raw_df.drop_duplicates(subset=["restaurant_id"]).copy()
+    if add_boro_filter != "All":
+        search_df = search_df[search_df["boro"] == add_boro_filter]
+    if add_cuisine_filter != "All":
+        search_df = search_df[search_df["cuisine_type"] == add_cuisine_filter]
     if search_query:
         search_mask = (
             search_df["name"].fillna("").str.lower().str.contains(search_query, regex=False)
@@ -123,16 +183,16 @@ with st.sidebar:
 
     selected_rating = st.selectbox("Rating", options=[1, 2, 3, 4, 5], index=4)
 
-    if st.button("Add visited restaurant", use_container_width=True, disabled=not selected_restaurant_id):
+    if st.button("Add liked restaurant", use_container_width=True, disabled=not selected_restaurant_id):
         selected_row = search_df.loc[search_df["restaurant_id"].astype(str) == str(selected_restaurant_id)].iloc[0]
         updated = False
-        for entry in visit_entries:
+        for entry in liked_entries:
             if entry["restaurant_id"] == str(selected_restaurant_id):
                 entry["rating"] = selected_rating
                 updated = True
                 break
         if not updated:
-            visit_entries.append({
+            liked_entries.append({
                 "restaurant_id": str(selected_row["restaurant_id"]),
                 "name": selected_row.get("name", "Unknown"),
                 "cuisine_type": selected_row.get("cuisine_type", ""),
@@ -140,68 +200,101 @@ with st.sidebar:
                 "address": selected_row.get("address", ""),
                 "rating": selected_rating,
             })
-            visit_entries.sort(key=lambda item: (item["name"].lower(), item["restaurant_id"]))
-        st.session_state["recommendations_visit_entries"] = visit_entries
+            liked_entries.sort(key=lambda item: (item["name"].lower(), item["restaurant_id"]))
+        st.session_state["recommendations_liked_entries"] = liked_entries
+        profile = persist_liked_entries(profile_id, liked_entries, raw_df)
         if updated:
-            st.info("That restaurant is already in your history, so its rating was updated instead.")
+            st.info("That restaurant was already liked, so its rating was updated instead.")
         else:
-            st.success("Restaurant added to your visited history.")
+            st.success("Restaurant added to your liked list.")
         st.rerun()
 
-    if visit_entries:
-        visit_df = pd.DataFrame(visit_entries)[["name", "cuisine_type", "boro", "rating"]].rename(
-            columns={"name": "Restaurant", "cuisine_type": "Cuisine", "boro": "Borough", "rating": "Rating"}
-        )
-        st.dataframe(visit_df, use_container_width=True, hide_index=True)
+    if liked_entries:
+        st.markdown("#### Review And Filter Your Likes")
+        liked_entries_df = pd.DataFrame(liked_entries)
+        liked_borough_options = ["All"] + get_valid_borough_options(liked_entries_df)
+        liked_cuisine_options = ["All"] + get_valid_cuisine_options(liked_entries_df, column="cuisine_type")
+        liked_boro_filter = st.selectbox("Liked borough filter", liked_borough_options, key="liked_boro_filter")
+        liked_cuisine_filter = st.selectbox("Liked cuisine filter", liked_cuisine_options, key="liked_cuisine_filter")
+        liked_min_rating = st.slider("Minimum liked rating", 1, 5, 1, key="liked_min_rating")
 
-        remove_restaurant_id = st.selectbox(
-            "Remove a saved visit",
-            options=[entry["restaurant_id"] for entry in visit_entries],
-            format_func=lambda rid: next(
-                (
-                    f"{entry['name']} ({entry['rating']}/5)"
-                    for entry in visit_entries
-                    if entry["restaurant_id"] == rid
+        filtered_liked_entries = [
+            entry for entry in liked_entries
+            if (liked_boro_filter == "All" or entry["boro"] == liked_boro_filter)
+            and (liked_cuisine_filter == "All" or entry["cuisine_type"] == liked_cuisine_filter)
+            and int(entry["rating"]) >= liked_min_rating
+        ]
+        st.caption(f"Showing {len(filtered_liked_entries)} of {len(liked_entries)} liked restaurants.")
+        if filtered_liked_entries:
+            liked_df = pd.DataFrame(filtered_liked_entries)[["name", "cuisine_type", "boro", "rating"]].rename(
+                columns={"name": "Restaurant", "cuisine_type": "Cuisine", "boro": "Borough", "rating": "Rating"}
+            )
+            st.dataframe(liked_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No liked restaurants match the current filters. Adjust the filters to review or edit a saved like.")
+
+        editable_entries = filtered_liked_entries
+        edit_restaurant_id = None
+        selected_edit_entry = None
+        if editable_entries:
+            edit_restaurant_id = st.selectbox(
+                "Edit a liked restaurant",
+                options=[entry["restaurant_id"] for entry in editable_entries],
+                format_func=lambda rid: next(
+                    (
+                        f"{entry['name']} ({entry['rating']}/5)"
+                        for entry in editable_entries
+                        if entry["restaurant_id"] == rid
+                    ),
+                    rid,
                 ),
-                rid,
-            ),
-            index=None,
-            placeholder="Select a restaurant to remove",
+                index=None,
+                placeholder="Select a liked restaurant",
+            )
+            selected_edit_entry = next(
+                (entry for entry in editable_entries if entry["restaurant_id"] == edit_restaurant_id),
+                None,
+            )
+
+        updated_rating = st.selectbox(
+            "Updated rating",
+            options=[1, 2, 3, 4, 5],
+            index=max(0, int(selected_edit_entry["rating"]) - 1) if selected_edit_entry else 4,
+            key="liked_updated_rating",
+            disabled=not editable_entries,
         )
-        if st.button("Remove selected visit", use_container_width=True):
-            st.session_state["recommendations_visit_entries"] = [
-                entry for entry in visit_entries if entry["restaurant_id"] != remove_restaurant_id
-            ]
-            st.rerun()
-
-    if st.button("Save visited history", use_container_width=True):
-        profile = get_profile(profile_id=profile_id)
-        existing_likes = {str(item.get("restaurant_id")): item for item in profile.get("likes", []) if item.get("restaurant_id")}
-        updated_likes_by_restaurant = {}
-
-        for entry in st.session_state.get("recommendations_visit_entries", []):
-            restaurant_id = entry["restaurant_id"]
-            existing_like = existing_likes.get(restaurant_id, {})
-            updated_likes_by_restaurant[restaurant_id] = {
-                **existing_like,
-                "restaurant_id": restaurant_id,
-                "dba": entry["name"],
-                "cuisine": entry["cuisine_type"],
-                "boro": entry["boro"],
-                "rating": float(entry["rating"]),
-                "source": existing_like.get("source", "manual_history"),
-                "liked_at": existing_like.get("liked_at") or pd.Timestamp.now().isoformat(timespec="seconds"),
-            }
-
-        profile["likes"] = list(updated_likes_by_restaurant.values())
-        profile = upsert_profile(profile)
-        st.session_state["user_history"] = profile_to_user_history(profile, raw_df)
-        st.session_state["clustered_df"] = None
-        st.success("Visited history saved. Recommendations updated.")
-        st.rerun()
+        action_col1, action_col2 = st.columns(2)
+        with action_col1:
+            if st.button("Update rating", use_container_width=True, disabled=not edit_restaurant_id):
+                for entry in liked_entries:
+                    if entry["restaurant_id"] == edit_restaurant_id:
+                        entry["rating"] = updated_rating
+                        break
+                st.session_state["recommendations_liked_entries"] = liked_entries
+                profile = persist_liked_entries(profile_id, liked_entries, raw_df)
+                st.success("Liked restaurant rating updated.")
+                st.rerun()
+        with action_col2:
+            if st.button("Remove like", use_container_width=True, disabled=not edit_restaurant_id):
+                liked_entries = [
+                    entry for entry in liked_entries if entry["restaurant_id"] != edit_restaurant_id
+                ]
+                st.session_state["recommendations_liked_entries"] = liked_entries
+                profile = persist_liked_entries(profile_id, liked_entries, raw_df)
+                st.success("Liked restaurant removed.")
+                st.rerun()
+    else:
+        st.caption("You have not liked any restaurants yet. Add a few above to personalize recommendations.")
 
     st.markdown("---")
     k = st.slider("Number of Clusters (K)", 4, 16, st.session_state.get("optimal_k", 10))
+    shared_algo = st.session_state.get("active_cluster_algorithm", "kmeans")
+    shared_algo_display = {
+        "kmeans": "our NumPy K-Means",
+        "gmm": "Gaussian Mixture",
+        "agglomerative": "Hierarchical / Ward",
+    }.get(shared_algo, "our NumPy K-Means")
+    st.caption(f"Cluster context follows the GIS Map setup: `{shared_algo_display}` with `K = {k}`.")
 
     if st.button("🔄 Re-run Clustering"):
         st.session_state["clustered_df"] = None
@@ -209,10 +302,11 @@ with st.sidebar:
 user_history = st.session_state["user_history"]
 
 # ── Run clustering ────────────────────────────────────────────────────────────
-with st.spinner("Running K-Means clustering..."):
+with st.spinner("Updating recommendation context..."):
     cdf, kmeans, scaler, pca = get_clustered_data(
         raw_df, user_history, k=k,
-        force=(st.session_state["clustered_df"] is None)
+        force=(st.session_state["clustered_df"] is None),
+        algorithm=st.session_state.get("active_cluster_algorithm", "kmeans"),
     )
     st.session_state["clustered_df"] = cdf
     st.session_state["kmeans_model"] = kmeans
@@ -250,7 +344,7 @@ budget = profile.get("budget", "$$")
 n_likes = len(profile.get("likes", []))
 
 p1, p2, p3, p4 = st.columns(4)
-p1.metric("Budget", budget)
+p1.metric("Budget", format_budget_display(budget))
 p2.metric("Liked Restaurants", n_likes)
 p3.metric("Cuisines", ", ".join(pref_cuisines[:3]) if pref_cuisines else "Any")
 p4.metric("Boroughs", ", ".join(pref_boroughs[:2]) if pref_boroughs else "All NYC")
@@ -259,7 +353,7 @@ if n_likes == 0 and not pref_cuisines:
     st.info("💡 Like some restaurants or set your cuisine preferences in the sidebar to get personalized recommendations. Showing top-rated restaurants for now.")
 
 # Run K-NN with the selected method
-visited_ids = {str(v) for v in user_history.get("visited_ids", [])}
+liked_ids = {str(v) for v in user_history.get("visited_ids", [])}
 
 st.markdown("---")
 st.subheader("⚙️ Recommendation Method")
@@ -301,7 +395,7 @@ if rec_method.startswith("Per-liked"):
         profile_vector=user_vec,
         restaurant_matrix=X_restaurants,
         restaurant_df=df_feat,
-        visited_ids=visited_ids,
+        visited_ids=liked_ids,
         liked_metadata=liked_metadata,
         k_per_liked=30,
         k_final=50,
@@ -321,7 +415,7 @@ if rec_method.startswith("Per-liked"):
 else:
     recs = recommend_knn(
         user_vec, X_restaurants, df_feat,
-        visited_ids=visited_ids,
+        visited_ids=liked_ids,
         k=15,
         scaler=scaler,
     )
@@ -338,7 +432,7 @@ st.caption(
 )
 
 if recs.empty:
-    st.info("No unvisited restaurants found. Try clearing your visit history or adjusting preferences.")
+    st.info("No unseen restaurants found outside your liked list. Try broadening your preferences or removing a like.")
 else:
     unique_cuisines = recs["cuisine_type"].fillna("Other").nunique()
     unique_boroughs = recs["boro"].fillna("NYC").nunique()
@@ -415,15 +509,12 @@ st.caption("Each dot is a restaurant, colored by cluster. The ⭐ shows where yo
 
 if pca is not None and hasattr(pca, 'axis_labels_'):
     # Project all restaurants into PCA space
-    from utils.clustering import apply_user_weights, prepare_clustering_space
-    X_aug = apply_user_weights(X_restaurants, df_feat, user_history)
-    projection_feature_columns = feature_columns + ["user_affinity"]
-    X_scaled, X_cluster, _ = prepare_clustering_space(X_aug, scaler=scaler, fit=False)
+    from utils.clustering import prepare_clustering_space, _scaled_space
+    X_scaled, X_cluster, _ = prepare_clustering_space(X_restaurants, scaler=scaler, fit=False)
     X_pca_all = pca.transform(X_scaled)
 
     # Project user vector into PCA space
-    user_aug = np.append(user_vec, [0.5])  # user_affinity placeholder
-    user_scaled = scaler.transform(user_aug.reshape(1, -1))
+    user_scaled = _scaled_space(user_vec, scaler)
     user_pca = pca.transform(user_scaled)[0]
 
     # Cluster colors
@@ -515,4 +606,3 @@ cluster_summary["Is My Cluster"] = cluster_summary["cluster_id"].apply(
 )
 cluster_summary.columns = [c.replace("_", " ") for c in cluster_summary.columns]
 st.dataframe(cluster_summary.drop(columns=["cluster id"]), use_container_width=True, hide_index=True)
-

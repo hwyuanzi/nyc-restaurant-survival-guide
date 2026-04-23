@@ -33,6 +33,44 @@ def _format_budget_slider_value(value):
     return r"\$" * int(value)
 
 
+def format_budget_display(budget_value: str) -> str:
+    labels = {
+        "$": "Budget ($)",
+        "$$": "Mid-Range ($$)",
+        "$$$": "Premium ($$$)",
+        "$$$$": "Luxury ($$$$)",
+    }
+    return labels.get(budget_value, budget_value or "Not set")
+
+
+def get_valid_borough_options(df: pd.DataFrame) -> list[str]:
+    if df is None or df.empty or "boro" not in df.columns:
+        return BOROUGH_OPTIONS.copy()
+    present = set(
+        df["boro"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+    return [borough for borough in BOROUGH_OPTIONS if borough in present]
+
+
+def get_valid_cuisine_options(df: pd.DataFrame, column: str = "cuisine_type") -> list[str]:
+    if df is None or df.empty or column not in df.columns:
+        return []
+    invalid_values = {"", "0", "Unknown", "Nan", "None"}
+    values = sorted(
+        {
+            str(value).strip()
+            for value in df[column].dropna().tolist()
+            if str(value).strip() and str(value).strip().title() not in invalid_values
+            and str(value).strip() not in invalid_values
+        }
+    )
+    return values
+
+
 def _slugify(value):
     slug = re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
     return slug or DEFAULT_PROFILE_ID
@@ -331,12 +369,11 @@ def predict_user_cluster(user_history, df_clustered, kmeans, scaler):
         return int(cluster_votes.index[0])
 
     try:
-        from utils.clustering import apply_user_weights, build_feature_matrix, prepare_clustering_space
+        from utils.clustering import build_feature_matrix, prepare_clustering_space
 
         X, _, clustered = build_feature_matrix(df_clustered)
-        X_aug = apply_user_weights(X, clustered, user_history)
         visited_mask = clustered["restaurant_id"].isin(user_history["visited_ids"])
-        visited_vecs = X_aug[visited_mask.values]
+        visited_vecs = X[visited_mask.values]
         user_vec = visited_vecs.mean(axis=0).reshape(1, -1)
         _, user_vec_cluster, _ = prepare_clustering_space(user_vec, scaler=scaler, fit=False)
         return int(kmeans.predict(user_vec_cluster)[0])
@@ -436,6 +473,67 @@ def render_profile_sidebar():
 
     profile = get_profile(profile_id=profile["id"])
     st.caption(f"Saved likes: {len(profile.get('likes', []))}")
+
+    with st.expander("Account Management"):
+        st.caption("Update your password or permanently delete this profile.")
+        current_password = st.text_input("Current password", type="password", key="account_current_password")
+        new_password = st.text_input("New password", type="password", key="account_new_password")
+        confirm_password = st.text_input("Confirm new password", type="password", key="account_confirm_password")
+
+        if st.button("Update password", use_container_width=True):
+            if new_password != confirm_password:
+                st.error("New password and confirmation do not match.")
+            else:
+                from utils.auth import change_password
+
+                success, message = change_password(profile["id"], current_password, new_password)
+                if success:
+                    st.success(message)
+                else:
+                    st.error(message)
+
+        st.markdown("---")
+        st.caption("Deleting your profile removes your saved likes and preferences.")
+        delete_confirm_name = st.text_input(
+            f"Type `{profile['name']}` to confirm deletion",
+            key="account_delete_name",
+        ).strip()
+        delete_password = st.text_input("Password for deletion", type="password", key="account_delete_password")
+        delete_disabled = delete_confirm_name != profile["name"]
+        if st.button("Delete my profile", use_container_width=True, disabled=delete_disabled):
+            from utils.auth import delete_user_account
+
+            success, message = delete_user_account(profile["id"], delete_password)
+            if success:
+                st.session_state["authenticated_profile_id"] = None
+                st.session_state["active_profile_id"] = None
+                st.session_state["clustered_df"] = None
+                st.session_state["user_history"] = get_default_user_history()
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+
+    st.session_state["user_history"] = profile_to_user_history(profile)
+    return profile
+
+
+def get_active_profile():
+    """Return the authenticated profile without rendering sidebar controls."""
+    init_session_state()
+    profiles = load_profiles()
+    if not profiles:
+        guest_profile = _default_profile()
+        profiles[guest_profile["id"]] = guest_profile
+        save_profiles(profiles)
+
+    profile_ids = list(profiles.keys())
+    authenticated_id = st.session_state.get("authenticated_profile_id")
+    if authenticated_id not in profiles:
+        authenticated_id = profile_ids[0]
+
+    st.session_state["active_profile_id"] = authenticated_id
+    profile = get_profile(profile_id=authenticated_id)
     st.session_state["user_history"] = profile_to_user_history(profile)
     return profile
 

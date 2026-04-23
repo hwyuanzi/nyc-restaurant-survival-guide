@@ -3,6 +3,12 @@ import requests
 import streamlit as st
 
 NYC_DOHMH_API = "https://data.cityofnewyork.us/resource/43nn-pn8j.json"
+VALID_BOROUGHS = ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]
+
+
+def normalize_borough_series(series: pd.Series) -> pd.Series:
+    cleaned = series.fillna("").astype(str).str.strip().str.title()
+    return cleaned.where(cleaned.isin(VALID_BOROUGHS), other="")
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -24,7 +30,7 @@ def load_nyc_base(limit=8000):
     df = df.drop_duplicates(subset=["camis"], keep="first").copy()
     df["dba"] = df["dba"].fillna("").str.title().str.strip()
     df["cuisine"] = df["cuisine_description"].fillna("").str.strip()
-    df["boro"] = df["boro"].fillna("").str.title().str.strip()
+    df["boro"] = normalize_borough_series(df["boro"])
     df["address"] = (
         df.get("building", pd.Series([""] * len(df))).fillna("").astype(str)
         + " "

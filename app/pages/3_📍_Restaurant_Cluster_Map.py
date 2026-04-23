@@ -57,7 +57,9 @@ ALGO_OPTIONS = {
 st.title("📍 Restaurant Cluster GIS Map")
 st.markdown("Restaurants colored by cluster on a real NYC map.  Switch the "
             "clustering algorithm in the sidebar to see how the geometry of "
-            "the feature space changes the groupings.")
+            "the feature space changes the groupings.  The default K-Means path "
+            "uses our own NumPy implementation, while GMM and Ward are shown as "
+            "comparison baselines on the same interpretable restaurant features.")
 
 if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
     with st.spinner("Loading prepared restaurant data..."):
@@ -97,13 +99,12 @@ with st.sidebar:
 
     if st.button("🔍 Find Optimal K"):
         with st.spinner("Computing silhouette scores..."):
-            from utils.clustering import build_feature_matrix, apply_user_weights, prepare_clustering_space
+            from utils.clustering import build_feature_matrix, prepare_clustering_space
             X, _, _ = build_feature_matrix(raw_df)
-            X_aug   = apply_user_weights(X, raw_df, user_history)
-            _, X_cluster, _ = prepare_clustering_space(X_aug, fit=True)
-            best_k  = find_optimal_k(X_cluster)
+            _, X_cluster, _ = prepare_clustering_space(X, fit=True)
+            best_k  = find_optimal_k(X_cluster, algorithm=algorithm)
             st.session_state["optimal_k"] = best_k
-            st.success(f"Optimal K = {best_k}")
+            st.success(f"Optimal K for {algo_label} = {best_k}")
             k = best_k
 
     if st.button("🔄 Re-run Clustering"):
@@ -283,6 +284,8 @@ for i, cid in enumerate(unique_clusters):
     hex_c  = "#{:02x}{:02x}{:02x}".format(*color[:3])
     top3   = subset["cuisine_type"].value_counts().head(3).index.tolist()
     avg_r  = subset["avg_rating"].mean()
+    story  = subset["cluster_story"].iloc[0] if "cluster_story" in subset.columns else ""
+    drivers = subset["cluster_key_drivers"].iloc[0] if "cluster_key_drivers" in subset.columns else ""
 
     with col:
         st.markdown(f"""
@@ -292,8 +295,11 @@ for i, cid in enumerate(unique_clusters):
           <div style="font-size:.78rem; color:#7a7a9a">{len(subset)} restaurants</div>
           <div style="font-size:.78rem; color:#a0a0c0">{", ".join(top3)}</div>
           <div style="font-size:.78rem; color:#d19900">⭐ {avg_r:.2f}</div>
+          <div style="font-size:.74rem; color:#93c5fd; margin-top:0.25rem;">{drivers}</div>
         </div>
         """, unsafe_allow_html=True)
+        if story:
+            st.caption(story)
         if st.button(f"Explore →", key=f"explore_{cid}"):
             st.session_state["selected_cluster_label"] = label
             st.info(f"Use the taste-cluster filter on Home or Semantic Search to explore {label}.")

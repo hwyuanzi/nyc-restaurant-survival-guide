@@ -1,6 +1,14 @@
 import hashlib
 import os
-from utils.user_profile import get_profile, upsert_profile, _default_profile, _slugify, find_profile_by_name
+from utils.user_profile import (
+    _default_profile,
+    _slugify,
+    find_profile_by_name,
+    get_profile,
+    load_profiles,
+    save_profiles,
+    upsert_profile,
+)
 
 def hash_password(password, salt=None):
     """Securely hash a password with a salt."""
@@ -51,6 +59,47 @@ def register_user(username, password):
     return True, profile_id
 
 
+def change_password(profile_id, current_password, new_password):
+    """Change the password for an existing authenticated profile."""
+    profile = get_profile(profile_id=profile_id)
+    if not profile:
+        return False, "Profile not found."
+    if not new_password:
+        return False, "New password cannot be empty."
+
+    stored_hash = profile.get("password_hash")
+    stored_salt = profile.get("salt")
+    if stored_hash:
+        hashed_current, _ = hash_password(current_password or "", stored_salt)
+        if hashed_current != stored_hash:
+            return False, "Current password is incorrect."
+
+    hashed_pwd, salt = hash_password(new_password)
+    profile["password_hash"] = hashed_pwd
+    profile["salt"] = salt
+    upsert_profile(profile)
+    return True, "Password updated."
+
+
+def delete_user_account(profile_id, current_password):
+    """Delete a user account after password confirmation."""
+    profiles = load_profiles()
+    if profile_id not in profiles:
+        return False, "Profile not found."
+
+    profile = profiles[profile_id]
+    stored_hash = profile.get("password_hash")
+    stored_salt = profile.get("salt")
+    if stored_hash:
+        hashed_current, _ = hash_password(current_password or "", stored_salt)
+        if hashed_current != stored_hash:
+            return False, "Current password is incorrect."
+
+    del profiles[profile_id]
+    save_profiles(profiles)
+    return True, "Profile deleted."
+
+
 def require_auth():
     """Call at the top of any Streamlit page to enforce authentication.
     
@@ -95,4 +144,3 @@ def require_auth():
                 st.error(result)
     
     st.stop()
-

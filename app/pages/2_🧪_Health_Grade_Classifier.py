@@ -47,7 +47,7 @@ from models.custom_mlp import (
     hyperparameter_search,
     train_mlp,
 )
-from utils.user_profile import init_session_state, render_profile_sidebar
+from utils.user_profile import init_session_state
 
 # ---------------------------------------------------------------------------
 # Page chrome
@@ -61,8 +61,8 @@ from utils.auth import require_auth
 require_auth()
 
 with st.sidebar:
-    profile = render_profile_sidebar()
-    st.markdown("---")
+    st.markdown("### Analysis Controls")
+    st.caption("Use this sidebar for model-specific settings and experiment controls on this page.")
 
 st.title("🧪 Health Grade Classifier")
 

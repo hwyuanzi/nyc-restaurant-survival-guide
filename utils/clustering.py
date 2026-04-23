@@ -7,12 +7,14 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans, MiniBatchKMeans, AgglomerativeClustering
+from sklearn.cluster import AgglomerativeClustering
 from sklearn.mixture import GaussianMixture
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
+
+from models.kmeans_scratch import KMeansScratch
 
 CACHE_PATH = "data/cluster_cache.parquet"
 MODEL_PATH = "data/kmeans_model.joblib"
@@ -24,7 +26,7 @@ ALGO_CACHE_PATHS = {
     "agglomerative": ("data/cluster_cache_agglo.parquet", "data/cluster_model_agglo.joblib"),
 }
 CACHE_TTL  = 86400  # 24 hours
-CLUSTER_SCHEMA_VERSION = 21  # Bumped for rebalanced feature weights + min cluster size merge
+CLUSTER_SCHEMA_VERSION = 22  # Scratch K-Means + stable global clusters + profile labels
 TSNE_MAX_ROWS = 3500
 
 try:
@@ -92,53 +94,188 @@ def _label_looks_internal(label):
     return not text or bool(re.match(r"^(cluster\s*\d+|\d+\b)", text, flags=re.IGNORECASE))
 
 
-def _assign_cluster_labels(df: pd.DataFrame):
-    """Generate unique, human-readable labels directly from interpretable features."""
-    label_map = {}
+def _driver_short_label(feature_name: str, delta: float):
+    if feature_name.startswith("cuisine_") and delta > 0:
+        return feature_name.replace("cuisine_", "").replace("_", " ")
+    if feature_name.startswith("boro_") and delta > 0:
+        return feature_name.replace("boro_", "")
+
+    positive = {
+        "price_norm": "Premium",
+        "rating_norm": "Highly Rated",
+        "review_norm": "Popular",
+        "health_norm": "Strong Health",
+    }
+    negative = {
+        "price_norm": "Budget-Friendly",
+    }
+    if delta >= 0:
+        return positive.get(feature_name)
+    return negative.get(feature_name)
+
+
+def _driver_phrase(feature_name: str, delta: float):
+    if feature_name.startswith("cuisine_") and delta > 0:
+        cuisine = feature_name.replace("cuisine_", "").replace("_", " ")
+        return f"over-indexes on {cuisine}"
+    if feature_name.startswith("boro_") and delta > 0:
+        borough = feature_name.replace("boro_", "")
+        return f"is concentrated in {borough}"
+
+    positive = {
+        "price_norm": "higher prices",
+        "rating_norm": "higher ratings",
+        "review_norm": "stronger review volume",
+        "health_norm": "better health inspection scores",
+        "lat_norm": "more northern locations",
+        "lng_norm": "more eastern locations",
+    }
+    negative = {
+        "price_norm": "more budget-friendly prices",
+        "rating_norm": "lower ratings",
+        "review_norm": "lighter review volume",
+        "health_norm": "weaker health inspection scores",
+        "lat_norm": "more southern locations",
+        "lng_norm": "more western locations",
+    }
+    if delta >= 0:
+        return positive.get(feature_name)
+    return negative.get(feature_name)
+
+
+def _select_cluster_drivers(feature_means: pd.Series, global_means: pd.Series):
+    deltas = (feature_means - global_means).sort_values(
+        key=lambda series: series.abs(), ascending=False
+    )
+    drivers = []
+    seen_categories = set()
+
+    for feature_name, delta in deltas.items():
+        category = _feature_category(feature_name)
+        abs_delta = abs(float(delta))
+        threshold = 0.06 if category in {"Cuisine", "Borough"} else 0.10
+
+        if abs_delta < threshold:
+            continue
+        if category in {"Cuisine", "Borough"} and delta <= 0:
+            continue
+        if category in seen_categories and category not in {"Cuisine", "Borough"}:
+            continue
+
+        short_label = _driver_short_label(feature_name, float(delta))
+        phrase = _driver_phrase(feature_name, float(delta))
+        if not short_label or not phrase:
+            continue
+
+        drivers.append(
+            {
+                "feature": feature_name,
+                "category": category,
+                "delta": float(delta),
+                "short_label": short_label,
+                "phrase": phrase,
+            }
+        )
+        seen_categories.add(category)
+        if len(drivers) >= 4:
+            break
+
+    return drivers
+
+
+def _build_cluster_profiles(df: pd.DataFrame) -> pd.DataFrame:
+    """Generate concise labels plus centroid-based explanations per cluster."""
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "cluster_id",
+                "cluster_label",
+                "cluster_key_drivers",
+                "cluster_story",
+            ]
+        )
+
+    feature_matrix, feature_columns, aligned_df = build_feature_matrix(df)
+    feature_df = pd.DataFrame(feature_matrix, columns=feature_columns, index=aligned_df.index)
+    global_means = feature_df.mean(axis=0)
+
+    profile_rows = []
     used_labels = set()
 
     for cluster_id in sorted(df["cluster_id"].unique()):
         cluster_df = df[df["cluster_id"] == cluster_id]
+        cluster_features = feature_df.loc[cluster_df.index]
+        feature_means = cluster_features.mean(axis=0)
+        drivers = _select_cluster_drivers(feature_means, global_means)
 
-        # Dominant cuisine
-        cuisine_counts = cluster_df["cuisine_type"].fillna("").astype(str).value_counts()
-        top_cuisine = cuisine_counts.index[0] if not cuisine_counts.empty and cuisine_counts.index[0] else "Mixed"
+        cuisine_counts = cluster_df["cuisine_type"].fillna("").astype(str).value_counts(normalize=True)
+        top_cuisine = cuisine_counts.index[0] if not cuisine_counts.empty and cuisine_counts.index[0] else ""
+        top_cuisine_share = float(cuisine_counts.iloc[0]) if not cuisine_counts.empty else 0.0
 
-        # Price descriptor
-        avg_price = pd.to_numeric(cluster_df["price_tier"], errors="coerce").mean()
-        price_desc = _price_descriptor(avg_price)
-
-        # Rating descriptor
-        avg_rating = pd.to_numeric(cluster_df["avg_rating"], errors="coerce").mean()
-        rating_desc = _rating_descriptor(avg_rating)
-
-        # Dominant borough
-        boro_counts = cluster_df["boro"].fillna("").astype(str).value_counts()
+        boro_counts = cluster_df["boro"].fillna("").astype(str).value_counts(normalize=True)
         top_boro = boro_counts.index[0] if not boro_counts.empty and boro_counts.index[0] not in ("", "0") else ""
+        top_boro_share = float(boro_counts.iloc[0]) if not boro_counts.empty else 0.0
 
-        # Build candidate labels in priority order
-        candidates = []
-        if top_cuisine != "Mixed":
-            candidates.append(f"{price_desc} {top_cuisine} · {rating_desc}")
-            if top_boro:
-                candidates.append(f"{top_cuisine} in {top_boro} · {rating_desc}")
-            candidates.append(f"{top_cuisine} · {price_desc}")
-        if top_boro:
-            candidates.append(f"{price_desc} {rating_desc} · {top_boro}")
-        candidates.append(f"{price_desc} {rating_desc}")
-        candidates.append(f"Cluster {cluster_id}")
-
-        chosen = None
-        for c in candidates:
-            if c not in used_labels and not _label_looks_internal(c):
-                chosen = c
+        label_parts = []
+        if top_cuisine and top_cuisine_share >= 0.22:
+            label_parts.append(top_cuisine)
+        if top_boro and top_boro_share >= 0.45:
+            label_parts.append(top_boro)
+        for driver in drivers:
+            part = driver["short_label"]
+            if part not in label_parts:
+                label_parts.append(part)
+            if len(label_parts) >= 3:
                 break
-        if chosen is None:
-            chosen = f"Group {cluster_id}"
-        label_map[cluster_id] = chosen
+
+        if not label_parts:
+            label_parts = [f"Cluster {cluster_id}"]
+
+        chosen = " · ".join(label_parts[:3])
+        if chosen in used_labels or _label_looks_internal(chosen):
+            chosen = f"{chosen} · C{cluster_id}"
         used_labels.add(chosen)
 
-    return df["cluster_id"].map(label_map)
+        avg_rating = pd.to_numeric(cluster_df["avg_rating"], errors="coerce").mean()
+        avg_price = pd.to_numeric(cluster_df["price_tier"], errors="coerce").mean()
+        avg_health = pd.to_numeric(cluster_df.get("score", pd.Series([np.nan] * len(cluster_df))), errors="coerce").mean()
+
+        driver_text = ", ".join(driver["phrase"] for driver in drivers[:3]) or "has a balanced mix of cuisine, quality, and location signals"
+        story = (
+            f"Defined by {driver_text}. "
+            f"Avg rating {avg_rating:.2f}, avg price tier {avg_price:.2f}, "
+            f"avg inspection score {avg_health:.1f}."
+        )
+
+        profile_rows.append(
+            {
+                "cluster_id": cluster_id,
+                "cluster_label": chosen,
+                "cluster_key_drivers": " | ".join(driver["short_label"] for driver in drivers[:3]) or "Balanced Mix",
+                "cluster_story": story,
+            }
+        )
+
+    return pd.DataFrame(profile_rows)
+
+
+def _attach_cluster_profiles(df: pd.DataFrame) -> pd.DataFrame:
+    profiles = _build_cluster_profiles(df)
+    if profiles.empty:
+        df = df.copy()
+        df["cluster_label"] = "Cluster"
+        df["cluster_key_drivers"] = ""
+        df["cluster_story"] = ""
+        return df
+    return df.merge(profiles, on="cluster_id", how="left")
+
+
+def _assign_cluster_labels(df: pd.DataFrame):
+    """Backward-compatible wrapper around centroid-based profile labels."""
+    profiles = _build_cluster_profiles(df)
+    if profiles.empty:
+        return pd.Series(["Cluster"] * len(df), index=df.index)
+    return df["cluster_id"].map(profiles.set_index("cluster_id")["cluster_label"])
 
 
 def _feature_category(feature_name):
@@ -287,19 +424,22 @@ def build_feature_matrix(df: pd.DataFrame):
 
 
 def apply_user_weights(X: np.ndarray, df: pd.DataFrame, user_history: dict):
+    affinity = compute_user_affinity(X, df, user_history)
+    return np.hstack([X, affinity.reshape(-1, 1)])
+
+
+def compute_user_affinity(X: np.ndarray, df: pd.DataFrame, user_history: dict):
     visited_ids = user_history.get("visited_ids", [])
     rated       = user_history.get("rated", {})
 
     if not visited_ids:
-        affinity = np.zeros(len(df))
-        return np.hstack([X, affinity.reshape(-1, 1)])
+        return np.zeros(len(df), dtype=np.float32)
 
     visited_mask = df["restaurant_id"].isin(visited_ids)
     visited_X    = X[visited_mask.values]
 
     if len(visited_X) == 0:
-        affinity = np.zeros(len(df))
-        return np.hstack([X, affinity.reshape(-1, 1)])
+        return np.zeros(len(df), dtype=np.float32)
 
     # Weighted mean of visited restaurants by rating
     weights = []
@@ -308,8 +448,8 @@ def apply_user_weights(X: np.ndarray, df: pd.DataFrame, user_history: dict):
     weights = np.array(weights).reshape(-1, 1)
     user_vec = (visited_X * weights).sum(axis=0, keepdims=True) / (weights.sum() + 1e-8)
 
-    affinity = cosine_similarity(X, user_vec).flatten()
-    return np.hstack([X, affinity.reshape(-1, 1)])
+    affinity = cosine_similarity(X, user_vec).flatten().astype(np.float32)
+    return affinity
 
 
 def prepare_clustering_space(X_aug: np.ndarray, scaler: StandardScaler | None = None, fit: bool = True):
@@ -346,11 +486,6 @@ def _cluster_signature(df: pd.DataFrame, user_history: dict, k: int,
     history_payload = {
         "schema_version": CLUSTER_SCHEMA_VERSION,
         "algorithm": algorithm,
-        "visited_ids": sorted(str(value) for value in user_history.get("visited_ids", [])),
-        "rated": {str(key): float(value) for key, value in sorted(user_history.get("rated", {}).items())},
-        "cuisine_preferences": sorted(str(value) for value in user_history.get("cuisine_preferences", [])),
-        "price_preference": int(user_history.get("price_preference", 2)),
-        "neighborhood_preference": sorted(str(value) for value in user_history.get("neighborhood_preference", [])),
         "k": int(k),
         "row_count": int(len(df)),
         "restaurant_sample": sorted(df["restaurant_id"].astype(str).head(25).tolist()),
@@ -359,13 +494,30 @@ def _cluster_signature(df: pd.DataFrame, user_history: dict, k: int,
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def find_optimal_k(X_scaled: np.ndarray, k_range=range(4, 16)) -> int:
+def find_optimal_k(X_scaled: np.ndarray, k_range=range(4, 16),
+                   algorithm: str = "kmeans") -> int:
     best_k, best_score = 8, -1
     for k in k_range:
         if k >= len(X_scaled):
             break
-        km = KMeans(n_clusters=k, init="k-means++", n_init=5, max_iter=100, random_state=42)
-        labels = km.fit_predict(X_scaled)
+        if algorithm == "kmeans":
+            model = KMeansScratch(n_clusters=k, n_init=6, max_iter=200, random_state=42)
+            labels = model.fit_predict(X_scaled)
+        elif algorithm == "gmm":
+            model = GaussianMixture(
+                n_components=k,
+                covariance_type="tied",
+                random_state=42,
+                n_init=3,
+                max_iter=150,
+                reg_covar=1e-4,
+            )
+            labels = model.fit_predict(X_scaled)
+        elif algorithm == "agglomerative":
+            model = AgglomerativeClustering(n_clusters=k, linkage="ward")
+            labels = model.fit_predict(X_scaled)
+        else:
+            raise ValueError(f"Unknown clustering algorithm: {algorithm!r}")
         if len(set(labels)) < 2:
             continue
         score = silhouette_score(X_scaled, labels, sample_size=min(1000, len(X_scaled)), random_state=42)
@@ -374,15 +526,24 @@ def find_optimal_k(X_scaled: np.ndarray, k_range=range(4, 16)) -> int:
     return best_k
 
 
+def _reindex_labels_and_centroids(labels: np.ndarray, X_cluster: np.ndarray):
+    unique_labels = sorted(np.unique(labels).tolist())
+    remap = {old: new for new, old in enumerate(unique_labels)}
+    dense_labels = np.array([remap[label] for label in labels], dtype=np.int64)
+    centroids = np.vstack([
+        X_cluster[dense_labels == cid].mean(axis=0)
+        for cid in range(len(unique_labels))
+    ]).astype(np.float32)
+    return dense_labels, centroids
+
+
 def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
     X, feature_columns, df = build_feature_matrix(df)
-    X_aug = apply_user_weights(X, df, user_history)
-    projection_feature_columns = feature_columns + ["user_affinity"]
+    user_affinity = compute_user_affinity(X, df, user_history)
+    projection_feature_columns = feature_columns
 
-    X_scaled, X_cluster, scaler = prepare_clustering_space(X_aug, fit=True)
+    X_scaled, X_cluster, scaler = prepare_clustering_space(X, fit=True)
 
-    # Use MiniBatchKMeans for large datasets
-    KMeansClass = MiniBatchKMeans if len(df) > 10000 else KMeans
     max_clusters = max(2, min(16, len(df) - 1))
     k = max(2, min(k, max_clusters))
 
@@ -392,10 +553,9 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
     best_score = -1
     candidate_seeds = [42, 52, 62, 72, 82]
     for seed in candidate_seeds:
-        candidate_model = KMeansClass(
+        candidate_model = KMeansScratch(
             n_clusters=k,
-            init="k-means++",
-            n_init=10,
+            n_init=8,
             max_iter=300,
             random_state=seed,
         )
@@ -416,14 +576,18 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
             best_model = candidate_model
             best_labels = candidate_labels
 
-    kmeans = best_model or KMeansClass(
+    kmeans = best_model or KMeansScratch(
         n_clusters=k,
-        init="k-means++",
-        n_init=10,
+        n_init=8,
         max_iter=300,
         random_state=42,
-    ).fit(X_cluster)
-    df["cluster_id"] = best_labels if best_labels is not None else kmeans.labels_
+    )
+    if best_model is None:
+        best_labels = kmeans.fit_predict(X_cluster)
+    else:
+        best_labels = best_labels if best_labels is not None else best_model.labels_
+        kmeans = best_model
+    df["cluster_id"] = best_labels
 
     # Merge undersized clusters (< 3% of total) into the nearest larger cluster
     # by centroid distance. Prevents tiny degenerate groups and "catch-all" patterns
@@ -446,6 +610,16 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
         target_cid = int(np.argmin(dists))
         df.loc[df["cluster_id"] == smallest_cid, "cluster_id"] = target_cid
 
+    final_labels, final_centroids = _reindex_labels_and_centroids(
+        df["cluster_id"].to_numpy(dtype=np.int64), X_cluster
+    )
+    df["cluster_id"] = final_labels
+    kmeans.labels_ = final_labels
+    kmeans.cluster_centers_ = final_centroids
+    kmeans.n_clusters = int(len(final_centroids))
+    kmeans.inertia_ = float(np.sum((X_cluster - final_centroids[final_labels]) ** 2))
+    kmeans.silhouette_score_ = best_score if best_score >= 0 else None
+
     # PCA 3D coordinates
     pca = PCA(n_components=3, random_state=42)
     X_pca = pca.fit_transform(X_scaled)
@@ -460,6 +634,7 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
         _component_summary(component, projection_feature_columns)
         for component in pca.components_[:3]
     ]
+    pca.feature_columns_ = projection_feature_columns
 
     # Cluster-oriented display coordinates based on centroid distances.
     centroid_distances = kmeans.transform(X_cluster)
@@ -488,11 +663,8 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
         df["tsne_y"] = np.nan
         df["tsne_z"] = np.nan
 
-    # Auto-label clusters with unique descriptive names
-    df["cluster_label"] = _assign_cluster_labels(df)
-
-    # User affinity score (last column of X_aug)
-    df["user_affinity_score"] = X_aug[:, -1]
+    df = _attach_cluster_profiles(df)
+    df["user_affinity_score"] = user_affinity
 
     # UMAP (optional)
     if UMAP_AVAILABLE:
@@ -539,7 +711,7 @@ def _merge_small_clusters(df: pd.DataFrame, centroids: np.ndarray,
 
 def _finalize_clusters(df: pd.DataFrame, labels: np.ndarray, centroids: np.ndarray,
                         X_scaled: np.ndarray, X_cluster: np.ndarray,
-                        X_aug: np.ndarray, projection_feature_columns: list):
+                        user_affinity: np.ndarray, projection_feature_columns: list):
     """Attach cluster_id + PCA / t-SNE / UMAP / cluster-view projections.
 
     Shared post-processing for non-KMeans algorithms that don't have a
@@ -550,6 +722,10 @@ def _finalize_clusters(df: pd.DataFrame, labels: np.ndarray, centroids: np.ndarr
     df["cluster_id"] = labels
 
     _merge_small_clusters(df, centroids)
+    final_labels, final_centroids = _reindex_labels_and_centroids(
+        df["cluster_id"].to_numpy(dtype=np.int64), X_cluster
+    )
+    df["cluster_id"] = final_labels
 
     pca = PCA(n_components=3, random_state=42)
     X_pca = pca.fit_transform(X_scaled)
@@ -564,10 +740,11 @@ def _finalize_clusters(df: pd.DataFrame, labels: np.ndarray, centroids: np.ndarr
         _component_summary(component, projection_feature_columns)
         for component in pca.components_[:3]
     ]
+    pca.feature_columns_ = projection_feature_columns
 
     # Distance from each point to each centroid (analogue of kmeans.transform).
     centroid_distances = np.linalg.norm(
-        X_cluster[:, None, :] - centroids[None, :, :], axis=2
+        X_cluster[:, None, :] - final_centroids[None, :, :], axis=2
     )
     cluster_view_pca = PCA(n_components=3, random_state=42)
     X_cluster_view = cluster_view_pca.fit_transform(
@@ -595,8 +772,8 @@ def _finalize_clusters(df: pd.DataFrame, labels: np.ndarray, centroids: np.ndarr
         df["tsne_y"] = np.nan
         df["tsne_z"] = np.nan
 
-    df["cluster_label"] = _assign_cluster_labels(df)
-    df["user_affinity_score"] = X_aug[:, -1]
+    df = _attach_cluster_profiles(df)
+    df["user_affinity_score"] = user_affinity
 
     if UMAP_AVAILABLE:
         try:
@@ -609,7 +786,7 @@ def _finalize_clusters(df: pd.DataFrame, labels: np.ndarray, centroids: np.ndarr
         except Exception:
             pass
 
-    return df, pca
+    return df, pca, final_centroids
 
 
 class _CentroidClusteringModel:
@@ -641,10 +818,10 @@ def run_gmm(df: pd.DataFrame, user_history: dict, k: int = 10):
     sometimes produces on sparse one-hot features.
     """
     X, feature_columns, df = build_feature_matrix(df)
-    X_aug = apply_user_weights(X, df, user_history)
-    projection_feature_columns = feature_columns + ["user_affinity"]
+    user_affinity = compute_user_affinity(X, df, user_history)
+    projection_feature_columns = feature_columns
 
-    X_scaled, X_cluster, scaler = prepare_clustering_space(X_aug, fit=True)
+    X_scaled, X_cluster, scaler = prepare_clustering_space(X, fit=True)
 
     max_clusters = max(2, min(16, len(df) - 1))
     k = max(2, min(k, max_clusters))
@@ -660,9 +837,15 @@ def run_gmm(df: pd.DataFrame, user_history: dict, k: int = 10):
     labels = gmm.fit_predict(X_cluster)
     centroids = gmm.means_.astype(np.float32)
 
-    wrapper = _CentroidClusteringModel(centroids, labels, "gmm", base_model=gmm)
-    df, pca = _finalize_clusters(df, labels, centroids, X_scaled, X_cluster,
-                                  X_aug, projection_feature_columns)
+    df, pca, final_centroids = _finalize_clusters(
+        df, labels, centroids, X_scaled, X_cluster, user_affinity, projection_feature_columns
+    )
+    wrapper = _CentroidClusteringModel(
+        final_centroids,
+        df["cluster_id"].to_numpy(dtype=np.int64),
+        "gmm",
+        base_model=gmm,
+    )
     return df, wrapper, scaler, pca
 
 
@@ -674,10 +857,10 @@ def run_agglomerative(df: pd.DataFrame, user_history: dict, k: int = 10):
     Centroids are computed post-hoc as per-cluster means.
     """
     X, feature_columns, df = build_feature_matrix(df)
-    X_aug = apply_user_weights(X, df, user_history)
-    projection_feature_columns = feature_columns + ["user_affinity"]
+    user_affinity = compute_user_affinity(X, df, user_history)
+    projection_feature_columns = feature_columns
 
-    X_scaled, X_cluster, scaler = prepare_clustering_space(X_aug, fit=True)
+    X_scaled, X_cluster, scaler = prepare_clustering_space(X, fit=True)
 
     max_clusters = max(2, min(16, len(df) - 1))
     k = max(2, min(k, max_clusters))
@@ -693,9 +876,15 @@ def run_agglomerative(df: pd.DataFrame, user_history: dict, k: int = 10):
     remap = {old: new for new, old in enumerate(unique_labels)}
     labels = np.array([remap[l] for l in labels], dtype=np.int64)
 
-    wrapper = _CentroidClusteringModel(centroids, labels, "agglomerative", base_model=agg)
-    df, pca = _finalize_clusters(df, labels, centroids, X_scaled, X_cluster,
-                                  X_aug, projection_feature_columns)
+    df, pca, final_centroids = _finalize_clusters(
+        df, labels, centroids, X_scaled, X_cluster, user_affinity, projection_feature_columns
+    )
+    wrapper = _CentroidClusteringModel(
+        final_centroids,
+        df["cluster_id"].to_numpy(dtype=np.int64),
+        "agglomerative",
+        base_model=agg,
+    )
     return df, wrapper, scaler, pca
 
 
@@ -725,8 +914,7 @@ def compute_silhouette(df: pd.DataFrame, user_history: dict, algorithm: str,
     """
     result_df, model, _scaler, _pca = run_clustering(df, user_history, k, algorithm)
     X, _cols, _df_unused = build_feature_matrix(df)
-    X_aug = apply_user_weights(X, df, user_history)
-    X_scaled, X_cluster, _s = prepare_clustering_space(X_aug, fit=True)
+    X_scaled, X_cluster, _s = prepare_clustering_space(X, fit=True)
     labels = result_df["cluster_id"].values
     try:
         score = silhouette_score(
@@ -788,6 +976,18 @@ def save_cache(df, model, scaler, pca, signature, algorithm: str = "kmeans"):
     )
 
 
+def _attach_user_context(df: pd.DataFrame, user_history: dict):
+    """Keep clustering global/stable while computing user affinity per session."""
+    if df.empty:
+        return df.copy()
+
+    df = df.copy()
+    feature_matrix, _feature_columns, aligned_df = build_feature_matrix(df)
+    affinity = compute_user_affinity(feature_matrix, aligned_df, user_history)
+    df["user_affinity_score"] = affinity
+    return df
+
+
 def get_clustered_data(df: pd.DataFrame, user_history: dict, k: int = 10,
                        force: bool = False, algorithm: str = "kmeans"):
     signature = _cluster_signature(df, user_history, k, algorithm)
@@ -800,13 +1000,13 @@ def get_clustered_data(df: pd.DataFrame, user_history: dict, k: int = 10,
             has_cluster_view = {"cluster_view_x", "cluster_view_y", "cluster_view_z"}.issubset(cached_df.columns)
             has_tsne_view = {"tsne_x", "tsne_y", "tsne_z"}.issubset(cached_df.columns)
             if cached_signature == signature and not has_duplicate_labels and not has_internal_labels and has_cluster_view and has_tsne_view:
-                return cached_df, cached_model, cached_scaler, cached_pca
+                return _attach_user_context(cached_df, user_history), cached_model, cached_scaler, cached_pca
         except Exception:
             # Corrupt or schema-mismatched cache — fall through to recompute.
             pass
     result_df, model, scaler, pca = run_clustering(df, user_history, k, algorithm)
     save_cache(result_df, model, scaler, pca, signature, algorithm)
-    return result_df, model, scaler, pca
+    return _attach_user_context(result_df, user_history), model, scaler, pca
 
 
 # ---------------------------------------------------------------------------
@@ -927,26 +1127,16 @@ def recommend_knn(user_vector: np.ndarray,
     restaurant_df : DataFrame with restaurant metadata
     visited_ids : set of restaurant_id strings to exclude
     k : number of recommendations to return
-    scaler : optional StandardScaler for normalisation before similarity.
-             Note: the scaler was fit on 23-dim vectors (22 features + user_affinity),
-             so we append a placeholder affinity column before transforming.
+    scaler : optional StandardScaler for normalization before similarity.
+             Handles both the newer 22-dim cluster scaler and the legacy
+             23-dim [features + user_affinity] scaler.
 
     Returns
     -------
     DataFrame of top-K recommended restaurants with a ``knn_similarity`` column.
     """
-    # The scaler expects 23 features (build_feature_matrix output + user_affinity).
-    # Append a placeholder user_affinity column to match.
-    n_rows = restaurant_matrix.shape[0]
-    X_aug = np.hstack([restaurant_matrix, np.zeros((n_rows, 1), dtype=np.float32)])
-    u_aug = np.append(user_vector, [0.5]).reshape(1, -1)  # neutral affinity
-
-    if scaler is not None:
-        X_scaled = scaler.transform(X_aug)
-        u_scaled = scaler.transform(u_aug)
-    else:
-        X_scaled = X_aug
-        u_scaled = u_aug
+    X_scaled = _scaled_space(restaurant_matrix, scaler)
+    u_scaled = _scaled_space(user_vector, scaler)
 
     similarities = cosine_similarity(u_scaled, X_scaled).flatten()
 
@@ -961,20 +1151,27 @@ def recommend_knn(user_vector: np.ndarray,
 
 
 def _scaled_space(vectors: np.ndarray, scaler: StandardScaler | None):
-    """Apply the StandardScaler fit during clustering (which expects the
-    23-dim [features + user_affinity] layout) to a 22-dim vector matrix.
+    """Apply the cluster scaler to 22-dim feature vectors.
 
-    The recommender works on the 22-dim ``build_feature_matrix`` output but
-    the scaler was fit on that plus a user-affinity column, so we append a
-    neutral placeholder column before transforming.
+    Supports both:
+    - current 22-dim clustering space
+    - legacy 23-dim [features + user_affinity] scaler artifacts
     """
     if vectors.ndim == 1:
         vectors = vectors.reshape(1, -1)
-    n = vectors.shape[0]
-    aug = np.hstack([vectors, np.full((n, 1), 0.5, dtype=np.float32)])
     if scaler is None:
-        return aug
-    return scaler.transform(aug)
+        return vectors
+
+    expected_dim = getattr(scaler, "n_features_in_", vectors.shape[1])
+    if expected_dim == vectors.shape[1]:
+        return scaler.transform(vectors)
+    if expected_dim == vectors.shape[1] + 1:
+        n = vectors.shape[0]
+        aug = np.hstack([vectors, np.full((n, 1), 0.5, dtype=np.float32)])
+        return scaler.transform(aug)
+    raise ValueError(
+        f"Scaler expects {expected_dim} features but received {vectors.shape[1]}"
+    )
 
 
 def recommend_per_liked_knn(
@@ -1202,4 +1399,3 @@ def collect_liked_vectors(
     if not rows:
         return np.zeros((0, restaurant_matrix.shape[1]), dtype=np.float32), []
     return np.vstack(rows).astype(np.float32), metadata
-
