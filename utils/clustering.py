@@ -16,7 +16,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 CACHE_PATH = "data/cluster_cache.parquet"
 MODEL_PATH = "data/kmeans_model.joblib"
 CACHE_TTL  = 86400  # 24 hours
-CLUSTER_SCHEMA_VERSION = 20  # Bumped to force rebuild with interpretable features
+CLUSTER_SCHEMA_VERSION = 21  # Bumped for rebalanced feature weights + min cluster size merge
 TSNE_MAX_ROWS = 3500
 
 try:
@@ -256,15 +256,16 @@ def build_feature_matrix(df: pd.DataFrame):
     ).values.astype(np.float32)
 
     # --- Assemble with feature weights ---
-    # Weights control relative importance: cuisine and price are primary clustering drivers
+    # Rebalanced so cuisine one-hots no longer dominate: price/rating/location
+    # carry more signal, cuisine is softened to avoid a catch-all "Other" mega-cluster.
     X = np.hstack([
-        price_norm * 1.2,
-        rating_norm * 1.0,
+        price_norm * 1.5,
+        rating_norm * 1.3,
         review_norm * 0.7,
         health_norm * 0.5,
-        lat_norm * 0.6,
-        lng_norm * 0.6,
-        cuisine_dummies * 1.0,
+        lat_norm * 0.8,
+        lng_norm * 0.8,
+        cuisine_dummies * 0.8,
         boro_dummies * 0.8,
     ]).astype(np.float32)
 
@@ -363,7 +364,7 @@ def find_optimal_k(X_scaled: np.ndarray, k_range=range(4, 16)) -> int:
     return best_k
 
 
-def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 8):
+def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
     X, feature_columns, df = build_feature_matrix(df)
     X_aug = apply_user_weights(X, df, user_history)
     projection_feature_columns = feature_columns + ["user_affinity"]
@@ -414,16 +415,26 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 8):
     ).fit(X_cluster)
     df["cluster_id"] = best_labels if best_labels is not None else kmeans.labels_
 
-    # Merge degenerate single-restaurant clusters
-    cluster_sizes = df["cluster_id"].value_counts()
-    small_clusters = cluster_sizes[cluster_sizes == 1].index.tolist()
+    # Merge undersized clusters (< 3% of total) into the nearest larger cluster
+    # by centroid distance. Prevents tiny degenerate groups and "catch-all" patterns
+    # where one cluster absorbs everything that didn't fit elsewhere.
     centroids = kmeans.cluster_centers_
-    for cid in small_clusters:
-        idx = df[df["cluster_id"] == cid].index[0]
-        vec = X_cluster[df.index.get_loc(idx)].reshape(1, -1)
-        dists = np.linalg.norm(centroids - vec, axis=1)
-        dists[cid] = np.inf
-        df.loc[idx, "cluster_id"] = int(np.argmin(dists))
+    min_cluster_size = max(1, int(round(len(df) * 0.03)))
+    while True:
+        cluster_sizes = df["cluster_id"].value_counts()
+        small_cluster_ids = cluster_sizes[cluster_sizes < min_cluster_size].index.tolist()
+        large_cluster_ids = cluster_sizes[cluster_sizes >= min_cluster_size].index.tolist()
+        if not small_cluster_ids or not large_cluster_ids:
+            break
+        # Merge the smallest cluster into the nearest large cluster by centroid distance
+        smallest_cid = cluster_sizes.idxmin()
+        dists = np.linalg.norm(centroids - centroids[smallest_cid], axis=1)
+        dists[smallest_cid] = np.inf
+        for cid in range(len(centroids)):
+            if cid not in large_cluster_ids:
+                dists[cid] = np.inf
+        target_cid = int(np.argmin(dists))
+        df.loc[df["cluster_id"] == smallest_cid, "cluster_id"] = target_cid
 
     # PCA 3D coordinates
     pca = PCA(n_components=3, random_state=42)
@@ -505,7 +516,7 @@ def save_cache(df, kmeans, scaler, pca, signature):
     joblib.dump({"kmeans": kmeans, "scaler": scaler, "pca": pca, "signature": signature}, MODEL_PATH)
 
 
-def get_clustered_data(df: pd.DataFrame, user_history: dict, k: int = 8, force: bool = False):
+def get_clustered_data(df: pd.DataFrame, user_history: dict, k: int = 10, force: bool = False):
     signature = _cluster_signature(df, user_history, k)
     if not force and cache_is_fresh():
         cached_df, cached_kmeans, cached_scaler, cached_pca, cached_signature = load_cache()
@@ -611,13 +622,13 @@ def build_user_feature_vector(profile: dict, restaurant_df: pd.DataFrame) -> np.
 
     # --- Assemble (must match build_feature_matrix order & weights) ---
     user_vec = np.concatenate([
-        [price_norm * 1.2],
-        [avg_rating_norm * 1.0],
+        [price_norm * 1.5],
+        [avg_rating_norm * 1.3],
         [avg_review_norm * 0.7],
         [avg_health_norm * 0.5],
-        [lat_norm * 0.6],
-        [lng_norm * 0.6],
-        cuisine_vec * 1.0,
+        [lat_norm * 0.8],
+        [lng_norm * 0.8],
+        cuisine_vec * 0.8,
         boro_vec * 0.8,
     ]).astype(np.float32)
 

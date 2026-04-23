@@ -264,6 +264,28 @@ def predict_single(feature_vec: np.ndarray):
 
 
 # ---------------------------------------------------------------------------
+# How the classifier works
+# ---------------------------------------------------------------------------
+
+with st.expander("📐 How the MLP Classifier Works", expanded=False):
+    st.markdown(
+        f"""
+**Input:** Each restaurant is represented as a {input_dim}-dimensional feature vector:
+- **7 numerical features** (inspection scores, violation counts, critical ratios) — standardized via z-score using the training-set mean and std
+- **6 borough one-hot features** (Manhattan, Brooklyn, Queens, Bronx, Staten Island, Unknown)
+- **16 cuisine one-hot features** (American, Chinese, Italian, …, Other)
+
+**Model:** 3-layer MLP ({input_dim} → 128 → 128 → 3) with ReLU activation and dropout
+- Trained on 17,000+ real DOHMH inspection records
+- Class weights compensate for imbalanced grades (78% A / 16% B / 6% C)
+- Early stopping on validation F1 prevents overfitting
+
+**Output:** Probability distribution over 3 classes (A, B, C)
+- If B or C, a counterfactual gradient-descent search finds the minimum set of changes that would flip the prediction to A.
+"""
+    )
+
+# ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
 
