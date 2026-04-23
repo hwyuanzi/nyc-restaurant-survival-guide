@@ -60,6 +60,18 @@ class CustomMLP(nn.Module):
         out = self.fc3(out)
         return out
 
+    def forward_hidden(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the penultimate-layer activations (post fc2 + ReLU).
+
+        Dropout is intentionally skipped — callers should also put the
+        module in ``eval()`` mode.  These activations are what the final
+        linear classifier sees, so projecting them is a faithful picture
+        of the latent space the MLP has learned.
+        """
+        out = self.relu(self.fc1(x))
+        out = self.relu(self.fc2(out))
+        return out
+
 
 # ---------------------------------------------------------------------------
 # 2. Training utilities
