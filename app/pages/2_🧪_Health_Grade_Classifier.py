@@ -11,7 +11,10 @@ tabs share a single, really-trained model:
                        per-class precision / recall / F1, overall weighted F1.
 3. Training Diagnostics — train / validation loss and F1 curves, whether
                           early stopping fired, what the best epoch was.
-4. Hyperparameter Justification — grid search results over
+4. Latent Space — 128-d hidden-layer geometry projected to 2D (PCA / t-SNE)
+                  plus a 2D decision-boundary slice in the original feature
+                  space.
+5. Hyperparameter Justification — grid search results over
                                    (hidden_dim, lr, dropout), explaining
                                    why the deployed configuration was chosen.
 
@@ -32,6 +35,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import torch
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 from sklearn.model_selection import train_test_split
 
 from app.ui_utils import apply_apple_theme
@@ -209,6 +214,54 @@ def get_trained_model(hyperparams=None):
 model, training_history = get_trained_model()
 
 
+@st.cache_resource(show_spinner="Projecting hidden-layer activations (PCA / t-SNE)...")
+def get_hidden_space_artifacts():
+    """Compute hidden activations on the held-out test set and 2D projections."""
+    model.eval()
+    with torch.no_grad():
+        hidden = model.forward_hidden(tensors["X_test"]).cpu().numpy()
+
+    pca = PCA(n_components=2, random_state=42)
+    pca_2d = pca.fit_transform(hidden)
+
+    tsne = TSNE(
+        n_components=2,
+        perplexity=float(min(30, max(1, len(hidden) - 1))),
+        init="pca",
+        learning_rate="auto",
+        max_iter=1200,
+        random_state=42,
+    )
+    tsne_2d = tsne.fit_transform(hidden)
+
+    return {
+        "hidden": hidden,
+        "pca_2d": pca_2d,
+        "tsne_2d": tsne_2d,
+    }
+
+
+def _predict_classes_batch(feature_matrix: np.ndarray, batch_size: int = 1024) -> np.ndarray:
+    """Run batched class prediction on a feature matrix."""
+    model.eval()
+    preds = []
+    with torch.no_grad():
+        for start in range(0, len(feature_matrix), batch_size):
+            chunk = torch.from_numpy(feature_matrix[start:start + batch_size].astype(np.float32))
+            logits = model(chunk)
+            preds.append(logits.argmax(dim=1).cpu().numpy())
+    return np.concatenate(preds, axis=0)
+
+
+def _raw_feature_bounds():
+    """Min/max bounds in raw (unstandardized) numerical space from train split."""
+    train_scaled = train_df[numerical_features].values.astype(np.float32)
+    train_raw = train_scaled * scaler_scale + scaler_mean
+    mins = dict(zip(numerical_features, train_raw.min(axis=0)))
+    maxs = dict(zip(numerical_features, train_raw.max(axis=0)))
+    return mins, maxs
+
+
 # ---------------------------------------------------------------------------
 # Feature-engineering helpers
 #
@@ -289,10 +342,11 @@ with st.expander("📐 How the MLP Classifier Works", expanded=False):
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_live, tab_perf, tab_train, tab_hp = st.tabs([
+tab_live, tab_perf, tab_train, tab_latent, tab_hp = st.tabs([
     "🎛️ Live Prediction",
     "📊 Model Performance",
     "📈 Training Diagnostics",
+    "🧠 Latent Space",
     "🔬 Hyperparameter Justification",
 ])
 
@@ -323,6 +377,9 @@ with tab_live:
         filtered = meta_test[mask]
     else:
         filtered = meta_test.head(250)
+    if filtered.empty:
+        st.warning("No restaurants matched this query. Showing the default sample instead.")
+        filtered = meta_test.head(250)
 
     selection = st.dataframe(
         filtered[["dba", "boro", "cuisine_description", "grade"]].rename(
@@ -336,9 +393,14 @@ with tab_live:
         height=260,
     )
 
+    selected_camis = st.session_state.get("health_selected_camis")
     if selection.selection.rows:
         row_idx = selection.selection.rows[0]
         selected = filtered.iloc[row_idx]
+        st.session_state["health_selected_camis"] = str(selected.get("camis", ""))
+    elif selected_camis is not None and not meta_test.empty:
+        selected_rows = meta_test[meta_test["camis"].astype(str) == str(selected_camis)]
+        selected = selected_rows.iloc[0] if not selected_rows.empty else filtered.iloc[0]
     else:
         selected = filtered.iloc[0]
 
@@ -418,6 +480,12 @@ with tab_live:
 
     with col_right:
         feature_vec = build_feature_vector(sb, boro_choice, cuisine_choice)
+        st.session_state["health_live_raw_numerical"] = dict(sb)
+        st.session_state["health_live_boro"] = boro_choice
+        st.session_state["health_live_cuisine"] = cuisine_choice
+        st.session_state["health_live_feature_vec"] = feature_vec
+        st.session_state["health_selected_camis"] = str(selected.get("camis", ""))
+
         probs = predict_single(feature_vec)
         pred_idx = int(np.argmax(probs))
         pred_grade = GRADE_NAMES[pred_idx]
@@ -698,7 +766,184 @@ with tab_train:
         )
 
 # ---------------------------------------------------------------------------
-# Tab 4 — Hyperparameter justification
+# Tab 4 — Latent space visualisation
+# ---------------------------------------------------------------------------
+
+with tab_latent:
+    st.subheader("What the MLP learned in hidden space")
+    st.markdown(
+        "PCA preserves global structure; t-SNE preserves local neighborhoods. "
+        "Well-separated color regions suggest the 128-d hidden layer learned grade-discriminative features."
+    )
+
+    hidden_artifacts = get_hidden_space_artifacts()
+    projection_mode = st.radio(
+        "Projection method",
+        ["PCA (2D)", "t-SNE (2D)"],
+        horizontal=True,
+    )
+    projection = (
+        hidden_artifacts["pca_2d"]
+        if projection_mode == "PCA (2D)"
+        else hidden_artifacts["tsne_2d"]
+    )
+
+    n_points = min(len(projection), len(meta_test))
+    proj_xy = projection[:n_points]
+    meta_view = meta_test.iloc[:n_points].copy()
+    meta_view["grade"] = meta_view["grade"].fillna("Unknown").astype(str)
+
+    selected_camis = str(st.session_state.get("health_selected_camis", ""))
+    selected_mask = meta_view["camis"].astype(str) == selected_camis
+
+    latent_fig = go.Figure()
+    grade_order = ["A", "B", "C", "Unknown"]
+    grade_palette = {**GRADE_COLORS, "Unknown": "#8E8E93"}
+    for grade in grade_order:
+        grade_idx = np.where(meta_view["grade"].values == grade)[0]
+        if len(grade_idx) == 0:
+            continue
+        latent_fig.add_trace(go.Scatter(
+            x=proj_xy[grade_idx, 0],
+            y=proj_xy[grade_idx, 1],
+            mode="markers",
+            name=f"True grade {grade}",
+            marker=dict(size=7, color=grade_palette[grade], opacity=0.7),
+            text=meta_view.iloc[grade_idx]["dba"].fillna("Unknown").tolist(),
+            hovertemplate="<b>%{text}</b><br>%{fullData.name}<extra></extra>",
+        ))
+
+    if selected_mask.any():
+        selected_idx = int(np.where(selected_mask.values)[0][0])
+        selected_name = str(meta_view.iloc[selected_idx].get("dba", "Selected Restaurant"))
+        latent_fig.add_trace(go.Scatter(
+            x=[proj_xy[selected_idx, 0]],
+            y=[proj_xy[selected_idx, 1]],
+            mode="markers+text",
+            name="Selected restaurant",
+            text=["⭐"],
+            textposition="top center",
+            marker=dict(size=18, color="#FFD60A", line=dict(width=2, color="#1D1D1F")),
+            hovertemplate=f"<b>{selected_name}</b><br>Selected in Live Prediction<extra></extra>",
+        ))
+
+    latent_fig.update_layout(
+        height=520,
+        xaxis_title=f"{projection_mode.split()[0]} component 1",
+        yaxis_title=f"{projection_mode.split()[0]} component 2",
+        margin=dict(l=20, r=20, t=20, b=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font_family="Inter, -apple-system, sans-serif",
+    )
+    st.plotly_chart(latent_fig, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("#### 2D Decision-Boundary Slice (with other features fixed)")
+
+    default_raw = dict(zip(numerical_features, scaler_mean))
+    current_raw = st.session_state.get("health_live_raw_numerical", default_raw).copy()
+    live_boro = st.session_state.get("health_live_boro", "Manhattan")
+    live_cuisine = st.session_state.get("health_live_cuisine", "Other")
+
+    feature_col_1, feature_col_2 = st.columns(2)
+    default_x = "latest_score" if "latest_score" in numerical_features else numerical_features[0]
+    with feature_col_1:
+        axis_x = st.selectbox(
+            "X-axis feature",
+            options=numerical_features,
+            index=numerical_features.index(default_x),
+        )
+
+    y_candidates = [name for name in numerical_features if name != axis_x]
+    default_y = "critical_ratio" if "critical_ratio" in y_candidates else y_candidates[0]
+    with feature_col_2:
+        axis_y = st.selectbox(
+            "Y-axis feature",
+            options=y_candidates,
+            index=y_candidates.index(default_y),
+        )
+
+    mins, maxs = _raw_feature_bounds()
+    x_range = np.linspace(mins[axis_x], maxs[axis_x], 60)
+    y_range = np.linspace(mins[axis_y], maxs[axis_y], 60)
+    mesh_x, mesh_y = np.meshgrid(x_range, y_range)
+
+    grid_vectors = np.zeros((mesh_x.size, input_dim), dtype=np.float32)
+    for idx, (x_val, y_val) in enumerate(zip(mesh_x.ravel(), mesh_y.ravel())):
+        raw_values = dict(current_raw)
+        raw_values[axis_x] = float(x_val)
+        raw_values[axis_y] = float(y_val)
+        grid_vectors[idx] = build_feature_vector(raw_values, live_boro, live_cuisine)
+
+    pred_grid = _predict_classes_batch(grid_vectors).reshape(mesh_x.shape)
+    heatmap_colors = [
+        [0.00, GRADE_COLORS["A"]], [0.33, GRADE_COLORS["A"]],
+        [0.33, GRADE_COLORS["B"]], [0.66, GRADE_COLORS["B"]],
+        [0.66, GRADE_COLORS["C"]], [1.00, GRADE_COLORS["C"]],
+    ]
+
+    boundary_fig = go.Figure()
+    boundary_fig.add_trace(go.Heatmap(
+        x=x_range,
+        y=y_range,
+        z=pred_grid,
+        zmin=0,
+        zmax=2,
+        colorscale=heatmap_colors,
+        opacity=0.55,
+        showscale=False,
+        hovertemplate=f"{axis_x}: %{{x:.2f}}<br>{axis_y}: %{{y:.2f}}<br>Predicted: %{{z}}<extra></extra>",
+    ))
+
+    x_idx = numerical_features.index(axis_x)
+    y_idx = numerical_features.index(axis_y)
+    test_raw_x = test_df[axis_x].values.astype(np.float32) * scaler_scale[x_idx] + scaler_mean[x_idx]
+    test_raw_y = test_df[axis_y].values.astype(np.float32) * scaler_scale[y_idx] + scaler_mean[y_idx]
+    test_grades = meta_test["grade"].fillna("Unknown").astype(str).values
+
+    for grade in grade_order:
+        grade_mask = test_grades == grade
+        if not np.any(grade_mask):
+            continue
+        boundary_fig.add_trace(go.Scatter(
+            x=test_raw_x[grade_mask],
+            y=test_raw_y[grade_mask],
+            mode="markers",
+            name=f"Test set ({grade})",
+            marker=dict(size=5, color=grade_palette[grade], opacity=0.75, line=dict(width=0)),
+            hovertemplate=f"True grade {grade}<extra></extra>",
+        ))
+
+    if selected_camis:
+        boundary_fig.add_trace(go.Scatter(
+            x=[float(current_raw.get(axis_x, scaler_mean[x_idx]))],
+            y=[float(current_raw.get(axis_y, scaler_mean[y_idx]))],
+            mode="markers+text",
+            name="Current sandbox restaurant",
+            text=["⭐"],
+            textposition="top center",
+            marker=dict(size=16, color="#FFD60A", line=dict(width=2, color="#1D1D1F")),
+            hovertemplate="Current sandbox setting<extra></extra>",
+        ))
+
+    boundary_fig.update_layout(
+        height=560,
+        xaxis_title=axis_x.replace("_", " ").title(),
+        yaxis_title=axis_y.replace("_", " ").title(),
+        margin=dict(l=20, r=20, t=20, b=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font_family="Inter, -apple-system, sans-serif",
+    )
+    st.plotly_chart(boundary_fig, use_container_width=True)
+    st.caption(
+        "This slice only varies the two selected numerical features; all other numerical inputs and one-hot categories "
+        "are fixed to the current sandbox restaurant settings."
+    )
+
+# ---------------------------------------------------------------------------
+# Tab 5 — Hyperparameter justification
 # ---------------------------------------------------------------------------
 
 HP_CACHE_PATH = DATA_DIR / "cache" / "hp_search_results.json"

@@ -337,9 +337,35 @@ def predict_user_cluster(user_history, df_clustered, kmeans, scaler):
         X_aug = apply_user_weights(X, clustered, user_history)
         visited_mask = clustered["restaurant_id"].isin(user_history["visited_ids"])
         visited_vecs = X_aug[visited_mask.values]
+        if len(visited_vecs) == 0:
+            return -1
+
         user_vec = visited_vecs.mean(axis=0).reshape(1, -1)
         _, user_vec_cluster, _ = prepare_clustering_space(user_vec, scaler=scaler, fit=False)
-        return int(kmeans.predict(user_vec_cluster)[0])
+        user_vec_cluster = user_vec_cluster.reshape(-1)
+
+        if kmeans is not None and hasattr(kmeans, "predict"):
+            try:
+                predicted = int(kmeans.predict(user_vec_cluster.reshape(1, -1))[0])
+                return predicted
+            except Exception:
+                pass
+
+        centroids = getattr(kmeans, "cluster_centroids_", None) if kmeans is not None else None
+        if centroids is None:
+            labels = sorted(df_clustered["cluster_id"].dropna().unique().tolist())
+            if not labels:
+                return -1
+            centroids = np.vstack([
+                X_aug[df_clustered["cluster_id"] == cid].mean(axis=0)
+                for cid in labels
+            ])
+            _, centroids, _ = prepare_clustering_space(centroids, scaler=scaler, fit=False)
+            nearest_idx = int(np.argmin(np.linalg.norm(centroids - user_vec_cluster, axis=1)))
+            return int(labels[nearest_idx])
+
+        nearest_idx = int(np.argmin(np.linalg.norm(centroids - user_vec_cluster, axis=1)))
+        return nearest_idx
     except Exception:
         return -1
 
@@ -352,6 +378,7 @@ def init_session_state():
         "pca_model": None,
         "predicted_cluster": -1,
         "selected_cluster_label": "All Clusters",
+        "clustering_algorithm": "kmeans",
         "active_profile_id": None,
         "user_history": get_default_user_history(),
         "optimal_k": 10,
@@ -404,14 +431,12 @@ def render_profile_sidebar():
         options=BOROUGH_OPTIONS,
         default=profile.get("preferred_boroughs", []),
     )
-    budget_value = BUDGET_OPTIONS.index(profile.get("budget", "$$")) + 1 if profile.get("budget", "$$") in BUDGET_OPTIONS else 2
-    budget_value = st.select_slider(
+    current_budget = profile.get("budget", "$$")
+    budget = st.selectbox(
         "Budget",
-        options=range(1, len(BUDGET_OPTIONS) + 1),
-        value=budget_value,
-        format_func=_format_budget_slider_value,
+        options=BUDGET_OPTIONS,
+        index=BUDGET_OPTIONS.index(current_budget) if current_budget in BUDGET_OPTIONS else 1,
     )
-    budget = BUDGET_OPTIONS[budget_value - 1]
     min_grade = st.selectbox("Lowest acceptable health grade", ["A", "B", "C"], index=["A", "B", "C"].index(profile.get("min_grade", "B")))
     spice_tolerance = st.slider("Spice tolerance", 1, 5, int(profile.get("spice_tolerance", 3)))
     adventurousness = st.slider("Adventurousness", 1, 5, int(profile.get("adventurousness", 3)))

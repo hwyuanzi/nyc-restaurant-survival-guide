@@ -60,6 +60,12 @@ class CustomMLP(nn.Module):
         out = self.fc3(out)
         return out
 
+    def forward_hidden(self, x: torch.Tensor) -> torch.Tensor:
+        """Return hidden activations after ``fc2 -> ReLU`` (dropout disabled in eval mode)."""
+        out = self.relu(self.fc1(x))
+        out = self.relu(self.fc2(out))
+        return out
+
 
 # ---------------------------------------------------------------------------
 # 2. Training utilities

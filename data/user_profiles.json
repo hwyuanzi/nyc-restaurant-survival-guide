@@ -40,12 +40,17 @@
     "favorite_cuisines": [
       "Chinese"
     ],
-    "preferred_boroughs": [],
+    "preferred_boroughs": [
+      "Bronx"
+    ],
     "budget": "$$",
     "min_grade": "B",
     "spice_tolerance": 3,
     "adventurousness": 3,
-    "favorite_vibes": [],
+    "favorite_vibes": [
+      "Cozy",
+      "Trendy"
+    ],
     "likes": [
       {
         "restaurant_id": "50151969",
@@ -62,7 +67,7 @@
       }
     ],
     "created_at": "2026-04-14T21:23:23",
-    "updated_at": "2026-04-22T22:44:26"
+    "updated_at": "2026-04-23T12:46:28"
   },
   "testuserauth": {
     "id": "testuserauth",
