@@ -29,10 +29,11 @@ CLUSTER_HEX = [
 
 st.title("📊 PCA Embedding Explorer")
 st.markdown("""
-Restaurants plotted in 3D taste space. The default layout emphasizes cleaner cluster separation. 
+Restaurants plotted in 3D taste space using **fully interpretable features**: cuisine type, price tier, Google rating, review volume, health inspection score, borough, and geographic location.
 
-💡 **Why do different cuisines cluster together?** 
-Clusters are formed using K-Means on a *high-dimensional* feature space. Restaurants share a cluster not just because of their cuisine, but because they have highly similar **Price Tiers, Google Ratings, Health Inspection Grades, and Operational Patterns**. For example, an expensive French bistro and a high-end Japanese Omakase might cluster together as "Premium Quality Spots" despite serving different food.
+💡 **How to read this chart:** Each axis is a Principal Component that combines the original features. 
+Check the **Feature Loadings** section below to see exactly which features drive each axis. 
+Clusters group restaurants with similar cuisine, price, location, and quality profiles.
 """)
 
 if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
@@ -359,6 +360,44 @@ if st.session_state["pca_model"] is not None:
         yaxis=dict(gridcolor="#2a2a38"),
     )
     st.plotly_chart(bar_fig, use_container_width=True)
+
+# ── Cluster distance heatmap ──────────────────────────────────────────────────
+st.markdown("---")
+st.subheader("Cluster Distance Matrix")
+st.caption(
+    "Pairwise Euclidean distances between cluster centroids. "
+    "Small values (dark blue) mean the clusters are close in feature space — "
+    "they share similar cuisine, price, and quality profiles."
+)
+
+cluster_ids_sorted = sorted(cdf["cluster_id"].unique())
+cluster_labels_sorted = [cdf[cdf["cluster_id"] == cid]["cluster_label"].iloc[0] for cid in cluster_ids_sorted]
+centroids = kmeans.cluster_centers_
+n_clusters = len(cluster_ids_sorted)
+
+dist_matrix = np.zeros((n_clusters, n_clusters))
+for i in range(n_clusters):
+    for j in range(n_clusters):
+        dist_matrix[i, j] = np.linalg.norm(centroids[i] - centroids[j])
+
+heat_fig = go.Figure(go.Heatmap(
+    z=dist_matrix,
+    x=cluster_labels_sorted,
+    y=cluster_labels_sorted,
+    colorscale="Blues_r",
+    text=np.round(dist_matrix, 2),
+    texttemplate="%{text:.1f}",
+    hovertemplate="%{x} ↔ %{y}<br>Distance: %{z:.2f}<extra></extra>",
+))
+heat_fig.update_layout(
+    height=400,
+    margin=dict(l=10, r=10, t=30, b=10),
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(color="#e0e0f0", size=11),
+    xaxis=dict(tickangle=30),
+)
+st.plotly_chart(heat_fig, use_container_width=True)
 
 # ── Cluster table ─────────────────────────────────────────────────────────────
 st.markdown("---")

@@ -80,5 +80,22 @@
     "updated_at": "2026-04-22T22:35:45",
     "password_hash": "aac426561310205a88aa3e9e0d4e263b2a2792b3b0c6aa223f2e3a412c54a654",
     "salt": "e09b045550c636ac7b2454e5feace12e"
+  },
+  "test": {
+    "id": "test",
+    "name": "test",
+    "survey_completed": false,
+    "favorite_cuisines": [],
+    "preferred_boroughs": [],
+    "budget": "$$",
+    "min_grade": "B",
+    "spice_tolerance": 3,
+    "adventurousness": 3,
+    "favorite_vibes": [],
+    "likes": [],
+    "created_at": "2026-04-22T23:23:49",
+    "updated_at": "2026-04-22T23:23:49",
+    "password_hash": "074b606a7fc7418d98d2cf39d2381e002dc367cfd0a70257a8eefb24c869d073",
+    "salt": "908fd00a1804485c3bde8dda2e5d4530"
   }
 }

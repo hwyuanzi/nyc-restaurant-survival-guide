@@ -402,11 +402,14 @@ with tab_live:
 
         st.markdown(f"#### 🧠 Predicted Grade: **{pred_grade}**")
         if pred_grade == "A":
-            st.success(f"Safe · confidence {probs[0] * 100:.1f}%")
+            st.success(f"🎉 **Congratulations!** This restaurant is predicted to maintain a **Grade A**. Confidence: {probs[0] * 100:.1f}%")
+            st.markdown("Keep up the excellent hygiene standards. Continue routine inspections and maintain current operational practices.")
         elif pred_grade == "B":
-            st.warning(f"At risk · confidence {probs[1] * 100:.1f}%")
+            st.warning(f"⚠️ **At Risk — Grade B predicted.** Confidence: {probs[1] * 100:.1f}%")
+            st.markdown("This restaurant has areas that need improvement. Review the guidance below to understand what changes could earn a Grade A.")
         else:
-            st.error(f"Critical · confidence {probs[2] * 100:.1f}%")
+            st.error(f"🚨 **Critical — Grade C predicted.** Confidence: {probs[2] * 100:.1f}%")
+            st.markdown("**Multiple areas need immediate attention.** A Grade C indicates serious hygiene concerns. See the specific changes needed below.")
 
         prob_fig = go.Figure(go.Bar(
             x=[f"Grade {g}" for g in GRADE_NAMES],
@@ -425,8 +428,8 @@ with tab_live:
 
         # Counterfactual — what minimal change flips this to A?
         if pred_grade != "A":
-            st.markdown("##### 🎯 What would flip this to Grade A?")
-            with st.spinner("Solving counterfactual..."):
+            st.markdown("##### 🎯 Improvement Guidance: How to Achieve Grade A")
+            with st.spinner("Computing actionable recommendations..."):
                 # Freeze one-hot categorical features; only numerical features
                 # represent real-world operational levers a restaurant can
                 # change.
@@ -445,7 +448,20 @@ with tab_live:
                 # Rebuild the raw value table for the changed numerical features
                 cf_raw = cf[:len(numerical_features)] * scaler_scale + scaler_mean
                 # (Indices only line up because numerical features appear first.)
+                
+                # Plain-English interpretations for each feature
+                FEATURE_GUIDANCE = {
+                    "latest_score": "📋 **Latest inspection score**: Lower scores mean fewer violations on the most recent inspection. DOHMH cutoffs: A ≤ 13, B 14–27, C ≥ 28.",
+                    "avg_score": "📊 **Average inspection score**: Improve consistency across all inspections by addressing recurring violation patterns.",
+                    "max_score": "⚠️ **Worst-ever inspection score**: Prevent severe single-inspection failures through better preparation.",
+                    "num_inspections": "🔍 **Number of inspections**: More inspection history helps establish a reliable track record.",
+                    "num_violations": "📝 **Total violations**: Reduce the overall count of recorded violations through systematic hygiene improvements.",
+                    "critical_ratio": "🚨 **Critical violation ratio**: Focus on eliminating critical violations (food temperature, pest control, hand washing) which carry the heaviest weight.",
+                    "violations_per_inspection": "📉 **Violations per inspection**: Reduce the average number of violations found in each visit.",
+                }
+                
                 cf_rows = []
+                guidance_messages = []
                 for name, new_val in zip(numerical_features, cf_raw):
                     delta = new_val - sb[name]
                     if abs(delta) > 0.05 * max(abs(sb[name]), 1.0):
@@ -455,11 +471,20 @@ with tab_live:
                             "Suggested": f"{new_val:.2f}",
                             "Δ": f"{delta:+.2f}",
                         })
+                        if name in FEATURE_GUIDANCE:
+                            direction = "Decrease" if delta < 0 else "Increase"
+                            guidance_messages.append(
+                                f"{FEATURE_GUIDANCE[name]}\n   → {direction} from {sb[name]:.1f} to {new_val:.1f}"
+                            )
                 if cf_rows:
                     st.dataframe(
                         pd.DataFrame(cf_rows),
                         use_container_width=True, hide_index=True,
                     )
+                    if guidance_messages:
+                        st.markdown("**Actionable Recommendations:**")
+                        for msg in guidance_messages:
+                            st.markdown(msg)
                     st.caption(
                         "Minimum perturbation computed via gradient descent on "
                         "the input features while holding model weights frozen."

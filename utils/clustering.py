@@ -12,13 +12,11 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import TruncatedSVD
 
 CACHE_PATH = "data/cluster_cache.parquet"
 MODEL_PATH = "data/kmeans_model.joblib"
 CACHE_TTL  = 86400  # 24 hours
-CLUSTER_SCHEMA_VERSION = 10
+CLUSTER_SCHEMA_VERSION = 20  # Bumped to force rebuild with interpretable features
 TSNE_MAX_ROWS = 3500
 
 try:
@@ -28,84 +26,35 @@ except ImportError:
     UMAP_AVAILABLE = False
 
 REQUIRED_COLUMNS = ["restaurant_id", "name", "lat", "lng", "cuisine_type", "price_tier", "avg_rating", "review_count"]
-LABEL_BANNED_TERMS = {
-    "restaurant", "restaurants", "new", "york", "city", "nyc", "food", "place", "spot", "spots",
-    "google", "rating", "reviews", "health", "inspection", "grade", "score", "address", "great",
-    "good", "best", "serves", "serving", "dining", "delicious", "brooklyn", "manhattan", "queens",
-    "bronx", "staten", "island", "casual", "dinner", "lunch", "breakfast", "cozy", "lively", "late",
-    "night", "fresh", "hearty", "counter",
-}
+
+# Top cuisines to one-hot encode (rest → "Other"); chosen for interpretability
+TOP_CUISINES = [
+    "American", "Chinese", "Italian", "Mexican", "Japanese",
+    "Pizza", "Coffee/Tea", "Donuts", "Hamburgers", "Chicken",
+]
+
+# Human-readable labels for every clustering feature
 FEATURE_LABELS = {
-    "semantic_latent_1": "Semantic style",
-    "semantic_latent_2": "Semantic style",
-    "semantic_latent_3": "Semantic style",
-    "semantic_latent_4": "Semantic style",
-    "semantic_latent_5": "Semantic style",
-    "semantic_latent_6": "Semantic style",
-    "semantic_latent_7": "Semantic style",
-    "semantic_latent_8": "Semantic style",
-    "health_norm": "Health grade",
-    "price_tier_norm": "Price level",
+    "price_norm": "Price level",
     "rating_norm": "Google rating",
     "review_norm": "Review volume",
-    "lat_norm": "North-south location",
-    "lng_norm": "East-west location",
+    "health_norm": "Health grade",
+    "lat_norm": "North–south location",
+    "lng_norm": "East–west location",
     "user_affinity": "User affinity",
 }
+# Dynamically add cuisine and borough labels
+for _c in TOP_CUISINES:
+    FEATURE_LABELS[f"cuisine_{_c}"] = f"Cuisine: {_c}"
+FEATURE_LABELS["cuisine_Other"] = "Cuisine: Other"
+for _b in ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]:
+    FEATURE_LABELS[f"boro_{_b}"] = f"Borough: {_b}"
 
 
 def validate_dataframe(df: pd.DataFrame):
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"restaurants dataset is missing required columns: {missing}")
-
-
-def _build_cluster_text(df: pd.DataFrame):
-    tags = df.get("tags", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
-    summary = df.get("g_summary", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
-    description = df.get("description", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
-    cleaned_description = description.str.replace(r"Address:.*$", "", regex=True).str.replace(
-        r"Health inspection grade:.*$", "", regex=True
-    )
-    primary_text = tags.str.replace(",", " ", regex=False) + ". " + summary
-    return primary_text.where(primary_text.str.strip().str.len() > 8, cleaned_description).str.strip()
-
-
-def _cluster_theme_label(cluster_df: pd.DataFrame):
-    cluster_text = _build_cluster_text(cluster_df)
-    if cluster_text.empty or not cluster_text.str.strip().any():
-        return None
-    try:
-        vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), min_df=1, max_features=120)
-        matrix = vectorizer.fit_transform(cluster_text)
-    except ValueError:
-        matrix = None
-
-    if matrix is not None and matrix.shape[1] > 0:
-        mean_scores = np.asarray(matrix.mean(axis=0)).ravel()
-        terms = np.array(vectorizer.get_feature_names_out())
-        ranked_terms = []
-        for idx in np.argsort(mean_scores)[::-1]:
-            term = str(terms[idx]).strip()
-            if not term or term in LABEL_BANNED_TERMS:
-                continue
-            if any(part in LABEL_BANNED_TERMS for part in term.split()):
-                continue
-            ranked_terms.append(term)
-            if len(ranked_terms) == 3:
-                break
-        if ranked_terms:
-            if len(ranked_terms) >= 2 and len(ranked_terms[0].split()) == 1 and len(ranked_terms[1].split()) == 1:
-                return f"{ranked_terms[0].title()} & {ranked_terms[1].title()}"
-            return ranked_terms[0].title()
-
-    cuisine_counts = cluster_df["cuisine_type"].fillna("").astype(str).value_counts()
-    top_cuisines = [value for value in cuisine_counts.index.tolist() if value][:2]
-    if len(top_cuisines) >= 2:
-        return f"{top_cuisines[0]} + {top_cuisines[1]}"
-    if top_cuisines:
-        return top_cuisines[0]
-    return None
 
 
 def _price_descriptor(price_value):
@@ -130,112 +79,71 @@ def _rating_descriptor(rating_value):
     return "Emerging"
 
 
-def _review_descriptor(review_value):
-    if pd.isna(review_value):
-        return "Steady"
-    if review_value >= 400:
-        return "Crowd Favorites"
-    if review_value >= 150:
-        return "Local Staples"
-    return "Hidden Gems"
-
-
-def _health_descriptor(score_value, grade_value):
-    grade = str(grade_value or "").strip().upper()
-    if grade == "A":
-        return "Strong Health Scores"
-    if grade == "B":
-        return "Solid Health Scores"
-    if grade == "C":
-        return "Mixed Health Scores"
-    numeric_score = pd.to_numeric(score_value, errors="coerce")
-    if pd.notna(numeric_score) and numeric_score <= 10:
-        return "Strong Health Scores"
-    return "Mixed Health Scores"
-
-
-def _fallback_cluster_label(cluster_df: pd.DataFrame):
-    theme_desc = _cluster_theme_label(cluster_df)
-    price_desc = _price_descriptor(pd.to_numeric(cluster_df["price_tier"], errors="coerce").mean())
-    rating_desc = _rating_descriptor(pd.to_numeric(cluster_df["avg_rating"], errors="coerce").mean())
-
-    if theme_desc:
-        return f"{theme_desc} {rating_desc}"
-    return f"{price_desc} {rating_desc}"
-
-
 def _label_looks_internal(label):
     text = str(label or "").strip()
     return not text or bool(re.match(r"^(cluster\s*\d+|\d+\b)", text, flags=re.IGNORECASE))
 
 
-def _cluster_label_candidates(cluster_df: pd.DataFrame):
-    theme_desc = _cluster_theme_label(cluster_df)
-    price_desc = _price_descriptor(pd.to_numeric(cluster_df["price_tier"], errors="coerce").mean())
-    rating_desc = _rating_descriptor(pd.to_numeric(cluster_df["avg_rating"], errors="coerce").mean())
-    review_desc = _review_descriptor(pd.to_numeric(cluster_df["review_count"], errors="coerce").mean())
-    dominant_grade = ""
-    if "grade" in cluster_df.columns:
-        grade_mode = cluster_df["grade"].dropna().astype(str)
-        if not grade_mode.empty:
-            dominant_grade = grade_mode.mode().iloc[0]
-    score_series = cluster_df["score"] if "score" in cluster_df.columns else pd.Series([np.nan] * len(cluster_df), index=cluster_df.index)
-    health_desc = _health_descriptor(
-        pd.to_numeric(score_series, errors="coerce").mean(),
-        dominant_grade,
-    )
-
-    candidates = []
-    if theme_desc:
-        candidates.append(theme_desc)
-        candidates.append(f"{theme_desc} {rating_desc}")
-        candidates.append(f"{theme_desc} {price_desc}")
-    candidates.append(f"{price_desc} {rating_desc}")
-    candidates.append(f"{rating_desc} {review_desc}")
-    candidates.append(f"{health_desc} {rating_desc}")
-    candidates.append(_fallback_cluster_label(cluster_df))
-    return candidates
-
-
 def _assign_cluster_labels(df: pd.DataFrame):
+    """Generate unique, human-readable labels directly from interpretable features."""
     label_map = {}
     used_labels = set()
-    cluster_summaries = []
 
-    for cluster_id, cluster_df in df.groupby("cluster_id"):
-        cluster_summaries.append(
-            (
-                cluster_id,
-                cluster_df["cuisine_type"].fillna("").astype(str).nunique(),
-                len(cluster_df),
-                pd.to_numeric(cluster_df["review_count"], errors="coerce").fillna(0).mean(),
-                cluster_df.copy(),
-            )
-        )
+    for cluster_id in sorted(df["cluster_id"].unique()):
+        cluster_df = df[df["cluster_id"] == cluster_id]
 
-    cluster_summaries.sort(key=lambda item: (item[1], item[3], item[2], -int(item[0])), reverse=True)
+        # Dominant cuisine
+        cuisine_counts = cluster_df["cuisine_type"].fillna("").astype(str).value_counts()
+        top_cuisine = cuisine_counts.index[0] if not cuisine_counts.empty and cuisine_counts.index[0] else "Mixed"
 
-    for cluster_id, _, _, _, cluster_df in cluster_summaries:
-        chosen_label = None
-        for candidate in _cluster_label_candidates(cluster_df):
-            if candidate not in used_labels and not _label_looks_internal(candidate):
-                chosen_label = candidate
+        # Price descriptor
+        avg_price = pd.to_numeric(cluster_df["price_tier"], errors="coerce").mean()
+        price_desc = _price_descriptor(avg_price)
+
+        # Rating descriptor
+        avg_rating = pd.to_numeric(cluster_df["avg_rating"], errors="coerce").mean()
+        rating_desc = _rating_descriptor(avg_rating)
+
+        # Dominant borough
+        boro_counts = cluster_df["boro"].fillna("").astype(str).value_counts()
+        top_boro = boro_counts.index[0] if not boro_counts.empty and boro_counts.index[0] not in ("", "0") else ""
+
+        # Build candidate labels in priority order
+        candidates = []
+        if top_cuisine != "Mixed":
+            candidates.append(f"{price_desc} {top_cuisine} · {rating_desc}")
+            if top_boro:
+                candidates.append(f"{top_cuisine} in {top_boro} · {rating_desc}")
+            candidates.append(f"{top_cuisine} · {price_desc}")
+        if top_boro:
+            candidates.append(f"{price_desc} {rating_desc} · {top_boro}")
+        candidates.append(f"{price_desc} {rating_desc}")
+        candidates.append(f"Cluster {cluster_id}")
+
+        chosen = None
+        for c in candidates:
+            if c not in used_labels and not _label_looks_internal(c):
+                chosen = c
                 break
-        if chosen_label is None:
-            chosen_label = _fallback_cluster_label(cluster_df)
-        label_map[cluster_id] = chosen_label
-        used_labels.add(chosen_label)
+        if chosen is None:
+            chosen = f"Group {cluster_id}"
+        label_map[cluster_id] = chosen
+        used_labels.add(chosen)
 
     return df["cluster_id"].map(label_map)
 
 
 def _feature_category(feature_name):
-    if feature_name.startswith("semantic_latent_"):
-        return "Semantics"
-    if feature_name == "price_tier_norm":
+    if feature_name.startswith("cuisine_"):
+        return "Cuisine"
+    if feature_name.startswith("boro_"):
+        return "Borough"
+    if feature_name in {"price_norm"}:
         return "Price"
     if feature_name in {"rating_norm", "review_norm", "health_norm"}:
         return "Quality"
+    if feature_name in {"lat_norm", "lng_norm"}:
+        return "Location"
     if feature_name == "user_affinity":
         return "Affinity"
     return "Other"
@@ -244,34 +152,37 @@ def _feature_category(feature_name):
 def _humanize_feature(feature_name):
     if feature_name in FEATURE_LABELS:
         return FEATURE_LABELS[feature_name]
-    if feature_name.startswith("semantic_latent_"):
-        return "Semantic style"
-    if feature_name.startswith("tag_"):
-        return feature_name.replace("tag_", "").replace("_", " ").title()
+    if feature_name.startswith("cuisine_"):
+        return feature_name.replace("cuisine_", "").replace("_", " ").title()
+    if feature_name.startswith("boro_"):
+        return feature_name.replace("boro_", "")
     return feature_name.replace("_", " ").title()
 
 
 def _component_axis_label(component, feature_columns):
+    """Generate a human-readable PCA axis label from the top-2 feature loadings."""
     weights = pd.Series(np.abs(component), index=feature_columns)
-    category_weights = weights.groupby([_feature_category(name) for name in feature_columns]).sum().sort_values(ascending=False)
-    primary_category = category_weights.index[0] if not category_weights.empty else "Pattern"
-    secondary_category = category_weights.index[1] if len(category_weights) > 1 else None
+    category_weights = weights.groupby(
+        [_feature_category(name) for name in feature_columns]
+    ).sum().sort_values(ascending=False)
+    primary = category_weights.index[0] if not category_weights.empty else "Pattern"
+    secondary = category_weights.index[1] if len(category_weights) > 1 else None
 
-    category_labels = {
-        "Semantics": "Restaurant Style",
+    category_display = {
+        "Cuisine": "Cuisine Type",
+        "Borough": "Geographic Area",
         "Price": "Price Level",
         "Quality": "Quality & Popularity",
+        "Location": "Geographic Location",
         "Affinity": "User Match",
         "Other": "Mixed Factors",
     }
-    primary_label = category_labels.get(primary_category, "Mixed Factors")
-    secondary_label = category_labels.get(secondary_category, "") if secondary_category else ""
+    p_label = category_display.get(primary, primary)
+    s_label = category_display.get(secondary, "") if secondary else ""
 
-    if primary_category == "Semantics" and secondary_category in {"Price", "Quality", "Affinity"}:
-        return f"{primary_label} vs {secondary_label}"
-    if primary_category in {"Price", "Quality", "Affinity"} and secondary_category == "Semantics":
-        return f"{primary_label} vs Style"
-    return primary_label
+    if secondary and secondary != primary:
+        return f"{p_label} vs {s_label}"
+    return p_label
 
 
 def _component_summary(component, feature_columns):
@@ -292,63 +203,75 @@ def _component_summary(component, feature_columns):
 
 
 def build_feature_matrix(df: pd.DataFrame):
-    validate_dataframe(df)
+    """Build a fully interpretable feature matrix for clustering.
 
+    Every feature is human-readable: price, rating, review volume, health score,
+    cuisine one-hot, borough one-hot, and normalized lat/lng.
+    """
+    validate_dataframe(df)
     df = df.copy()
 
-    text_corpus = _build_cluster_text(df)
-    tfidf_max_features = min(1500, max(len(df) * 3, 250))
-    vectorizer = TfidfVectorizer(
-        stop_words="english",
-        ngram_range=(1, 2),
-        min_df=2 if len(df) >= 50 else 1,
-        max_df=0.9,
-        max_features=tfidf_max_features,
-    )
-    try:
-        text_matrix = vectorizer.fit_transform(text_corpus)
-    except ValueError:
-        text_matrix = None
+    # --- Numerical features (all normalized to 0-1) ---
 
-    semantic_features = np.zeros((len(df), 0), dtype=np.float32)
-    semantic_feature_columns = []
-    if text_matrix is not None and text_matrix.shape[1] > 0:
-        semantic_dims = min(8, text_matrix.shape[0] - 1, text_matrix.shape[1] - 1)
-        if semantic_dims >= 2:
-            svd = TruncatedSVD(n_components=semantic_dims, random_state=42)
-            semantic_features = svd.fit_transform(text_matrix).astype(np.float32)
-            semantic_feature_columns = [f"semantic_latent_{idx + 1}" for idx in range(semantic_features.shape[1])]
-
-    # 1. Price tier normalized
+    # 1. Price tier (1-4 → 0-1)
     price_norm = ((df["price_tier"].fillna(2) - 1) / 3.0).values.reshape(-1, 1)
 
-    # 2. Rating normalized
+    # 2. Rating (1-5 → 0-1)
     rating_norm = ((df["avg_rating"].fillna(3.0) - 1.0) / 4.0).values.reshape(-1, 1)
 
-    # 3. Review count log-scaled then min-max
+    # 3. Review count (log-scaled then min-max → 0-1)
     log_reviews = np.log1p(df["review_count"].fillna(0).values).reshape(-1, 1)
     log_min, log_max = log_reviews.min(), log_reviews.max()
-    if log_max > log_min:
-        review_norm = (log_reviews - log_min) / (log_max - log_min)
-    else:
-        review_norm = np.zeros_like(log_reviews)
+    review_norm = (log_reviews - log_min) / (log_max - log_min) if log_max > log_min else np.zeros_like(log_reviews)
 
-    # 4. Health inspection score, where lower is better
+    # 4. Health score (0-42, lower is better → inverted to 0-1 where 1 = best)
     health_series = df["score"] if "score" in df.columns else pd.Series([21] * len(df), index=df.index)
     health_source = pd.to_numeric(health_series, errors="coerce").fillna(21).clip(0, 42).values.reshape(-1, 1)
     health_norm = 1 - (health_source / 42.0)
 
+    # 5. Latitude / longitude (min-max normalized)
+    lat_vals = pd.to_numeric(df["lat"], errors="coerce").fillna(df["lat"].median()).values.reshape(-1, 1)
+    lng_vals = pd.to_numeric(df["lng"], errors="coerce").fillna(df["lng"].median()).values.reshape(-1, 1)
+    lat_min, lat_max = lat_vals.min(), lat_vals.max()
+    lng_min, lng_max = lng_vals.min(), lng_vals.max()
+    lat_norm = (lat_vals - lat_min) / (lat_max - lat_min) if lat_max > lat_min else np.zeros_like(lat_vals)
+    lng_norm = (lng_vals - lng_min) / (lng_max - lng_min) if lng_max > lng_min else np.zeros_like(lng_vals)
+
+    # --- Categorical features (one-hot) ---
+
+    # 6. Cuisine one-hot (top 10 + Other)
+    cuisine_series = df["cuisine_type"].fillna("Other").astype(str)
+    cuisine_group = cuisine_series.where(cuisine_series.isin(TOP_CUISINES), other="Other")
+    cuisine_dummies = pd.get_dummies(cuisine_group, prefix="cuisine").reindex(
+        columns=[f"cuisine_{c}" for c in TOP_CUISINES] + ["cuisine_Other"],
+        fill_value=0,
+    ).values.astype(np.float32)
+
+    # 7. Borough one-hot
+    boro_series = df["boro"].fillna("Unknown").astype(str)
+    boro_series = boro_series.where(boro_series.isin(["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]), other="Unknown")
+    boro_dummies = pd.get_dummies(boro_series, prefix="boro").reindex(
+        columns=[f"boro_{b}" for b in ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]],
+        fill_value=0,
+    ).values.astype(np.float32)
+
+    # --- Assemble with feature weights ---
+    # Weights control relative importance: cuisine and price are primary clustering drivers
     X = np.hstack([
-        semantic_features * 1.7,
-        price_norm * 1.0,
+        price_norm * 1.2,
         rating_norm * 1.0,
-        review_norm * 0.8,
-        health_norm * 0.55,
+        review_norm * 0.7,
+        health_norm * 0.5,
+        lat_norm * 0.6,
+        lng_norm * 0.6,
+        cuisine_dummies * 1.0,
+        boro_dummies * 0.8,
     ]).astype(np.float32)
 
     feature_columns = (
-        semantic_feature_columns +
-        ["price_tier_norm", "rating_norm", "review_norm", "health_norm"]
+        ["price_norm", "rating_norm", "review_norm", "health_norm", "lat_norm", "lng_norm"]
+        + [f"cuisine_{c}" for c in TOP_CUISINES] + ["cuisine_Other"]
+        + [f"boro_{b}" for b in ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]]
     )
 
     return X, feature_columns, df
@@ -596,3 +519,155 @@ def get_clustered_data(df: pd.DataFrame, user_history: dict, k: int = 8, force: 
     result_df, kmeans, scaler, pca = run_kmeans(df, user_history, k)
     save_cache(result_df, kmeans, scaler, pca, signature)
     return result_df, kmeans, scaler, pca
+
+
+# ---------------------------------------------------------------------------
+# K-NN Recommendation Engine
+# ---------------------------------------------------------------------------
+
+BUDGET_TO_PRICE = {"$": 1, "$$": 2, "$$$": 3, "$$$$": 4}
+BOROUGH_LIST = ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]
+
+
+def build_user_feature_vector(profile: dict, restaurant_df: pd.DataFrame) -> np.ndarray:
+    """Construct a user feature vector in the same space as restaurant features.
+
+    Uses the user's profile preferences (cuisine, borough, budget) blended
+    with statistics from their liked restaurants to place them in the
+    interpretable feature space used by clustering.
+
+    Returns a 1-D numpy array with 22 elements matching the feature columns
+    produced by ``build_feature_matrix()``.
+    """
+    liked_restaurants = profile.get("likes", [])
+    liked_ids = {str(l.get("restaurant_id", "")) for l in liked_restaurants if l.get("restaurant_id")}
+
+    # --- From profile preferences ---
+    budget_str = profile.get("budget", "$$")
+    price_pref = BUDGET_TO_PRICE.get(budget_str, 2)
+    price_norm = (price_pref - 1) / 3.0
+
+    fav_cuisines = profile.get("favorite_cuisines", [])
+    pref_boroughs = profile.get("preferred_boroughs", [])
+
+    # --- From liked restaurant history (if available) ---
+    liked_mask = restaurant_df["restaurant_id"].astype(str).isin(liked_ids)
+    liked_df = restaurant_df[liked_mask]
+
+    if len(liked_df) > 0:
+        avg_rating_norm = ((liked_df["avg_rating"].mean() - 1.0) / 4.0)
+        log_reviews = np.log1p(liked_df["review_count"].values)
+        log_min, log_max = np.log1p(restaurant_df["review_count"].fillna(0).values).min(), np.log1p(restaurant_df["review_count"].fillna(0).values).max()
+        avg_review_norm = ((log_reviews.mean() - log_min) / (log_max - log_min)) if log_max > log_min else 0.5
+        health_series = pd.to_numeric(liked_df["score"], errors="coerce").fillna(21).clip(0, 42)
+        avg_health_norm = 1 - (health_series.mean() / 42.0)
+        avg_lat = liked_df["lat"].mean()
+        avg_lng = liked_df["lng"].mean()
+    else:
+        avg_rating_norm = 0.5
+        avg_review_norm = 0.5
+        avg_health_norm = 0.7
+        avg_lat = restaurant_df["lat"].median()
+        avg_lng = restaurant_df["lng"].median()
+
+    # Normalize lat/lng using the same range as build_feature_matrix
+    lat_all = pd.to_numeric(restaurant_df["lat"], errors="coerce").fillna(restaurant_df["lat"].median())
+    lng_all = pd.to_numeric(restaurant_df["lng"], errors="coerce").fillna(restaurant_df["lng"].median())
+    lat_min, lat_max = lat_all.min(), lat_all.max()
+    lng_min, lng_max = lng_all.min(), lng_all.max()
+    lat_norm = (avg_lat - lat_min) / (lat_max - lat_min) if lat_max > lat_min else 0.5
+    lng_norm = (avg_lng - lng_min) / (lng_max - lng_min) if lng_max > lng_min else 0.5
+
+    # --- Cuisine one-hot (from preferences + liked history) ---
+    cuisine_vec = np.zeros(len(TOP_CUISINES) + 1, dtype=np.float32)  # +1 for Other
+    # From explicit preferences
+    for c in fav_cuisines:
+        if c in TOP_CUISINES:
+            cuisine_vec[TOP_CUISINES.index(c)] += 1.0
+        else:
+            cuisine_vec[-1] += 0.5  # Other
+    # From liked restaurant cuisines
+    if len(liked_df) > 0:
+        for cuisine in liked_df["cuisine_type"].fillna("Other"):
+            if cuisine in TOP_CUISINES:
+                cuisine_vec[TOP_CUISINES.index(cuisine)] += 0.5
+            else:
+                cuisine_vec[-1] += 0.25
+    # Normalize to sum to 1 if non-zero
+    if cuisine_vec.sum() > 0:
+        cuisine_vec = cuisine_vec / cuisine_vec.sum()
+
+    # --- Borough one-hot (from preferences + liked history) ---
+    boro_vec = np.zeros(len(BOROUGH_LIST), dtype=np.float32)
+    for b in pref_boroughs:
+        if b in BOROUGH_LIST:
+            boro_vec[BOROUGH_LIST.index(b)] += 1.0
+    if len(liked_df) > 0:
+        for boro in liked_df["boro"].fillna(""):
+            if boro in BOROUGH_LIST:
+                boro_vec[BOROUGH_LIST.index(boro)] += 0.5
+    if boro_vec.sum() > 0:
+        boro_vec = boro_vec / boro_vec.sum()
+
+    # --- Assemble (must match build_feature_matrix order & weights) ---
+    user_vec = np.concatenate([
+        [price_norm * 1.2],
+        [avg_rating_norm * 1.0],
+        [avg_review_norm * 0.7],
+        [avg_health_norm * 0.5],
+        [lat_norm * 0.6],
+        [lng_norm * 0.6],
+        cuisine_vec * 1.0,
+        boro_vec * 0.8,
+    ]).astype(np.float32)
+
+    return user_vec
+
+
+def recommend_knn(user_vector: np.ndarray,
+                  restaurant_matrix: np.ndarray,
+                  restaurant_df: pd.DataFrame,
+                  visited_ids: set,
+                  k: int = 15,
+                  scaler: StandardScaler = None) -> pd.DataFrame:
+    """Find the K nearest restaurants to the user vector using cosine similarity.
+
+    Parameters
+    ----------
+    user_vector : 1-D array matching the feature columns of build_feature_matrix (22 dims)
+    restaurant_matrix : 2-D array (N, 22) — raw output of build_feature_matrix
+    restaurant_df : DataFrame with restaurant metadata
+    visited_ids : set of restaurant_id strings to exclude
+    k : number of recommendations to return
+    scaler : optional StandardScaler for normalisation before similarity.
+             Note: the scaler was fit on 23-dim vectors (22 features + user_affinity),
+             so we append a placeholder affinity column before transforming.
+
+    Returns
+    -------
+    DataFrame of top-K recommended restaurants with a ``knn_similarity`` column.
+    """
+    # The scaler expects 23 features (build_feature_matrix output + user_affinity).
+    # Append a placeholder user_affinity column to match.
+    n_rows = restaurant_matrix.shape[0]
+    X_aug = np.hstack([restaurant_matrix, np.zeros((n_rows, 1), dtype=np.float32)])
+    u_aug = np.append(user_vector, [0.5]).reshape(1, -1)  # neutral affinity
+
+    if scaler is not None:
+        X_scaled = scaler.transform(X_aug)
+        u_scaled = scaler.transform(u_aug)
+    else:
+        X_scaled = X_aug
+        u_scaled = u_aug
+
+    similarities = cosine_similarity(u_scaled, X_scaled).flatten()
+
+    # Mask visited restaurants
+    visited_mask = restaurant_df["restaurant_id"].astype(str).isin(visited_ids)
+    similarities[visited_mask.values] = -np.inf
+
+    top_indices = np.argsort(similarities)[::-1][:k]
+    result = restaurant_df.iloc[top_indices].copy()
+    result["knn_similarity"] = similarities[top_indices]
+    return result.reset_index(drop=True)
+
