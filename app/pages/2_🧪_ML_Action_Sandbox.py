@@ -52,6 +52,9 @@ st.set_page_config(page_title="Health Analyzer Sandbox", page_icon="🧪", layou
 apply_apple_theme()
 init_session_state()
 
+from utils.auth import require_auth
+require_auth()
+
 with st.sidebar:
     profile = render_profile_sidebar()
     st.markdown("---")

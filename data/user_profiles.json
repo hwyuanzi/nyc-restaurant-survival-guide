@@ -15,16 +15,30 @@
     "spice_tolerance": 4,
     "adventurousness": 3,
     "favorite_vibes": [],
-    "likes": [],
+    "likes": [
+      {
+        "restaurant_id": "41148810",
+        "camis": "41148810",
+        "g_place_id": "ChIJs2Md1IX2wokRmGjrL0xSNro",
+        "dba": "Tropical Spanish Cuisine",
+        "cuisine": "Spanish",
+        "boro": "Manhattan",
+        "grade": "A",
+        "score": 4,
+        "rating": 5.0,
+        "source": "semantic_search",
+        "liked_at": "2026-04-22T21:51:06"
+      }
+    ],
     "created_at": "2026-04-14T19:18:03",
-    "updated_at": "2026-04-14T22:44:24"
+    "updated_at": "2026-04-22T21:51:06"
   },
   "hollan": {
     "id": "hollan",
     "name": "Hollan",
     "survey_completed": true,
     "favorite_cuisines": [
-      "Italian"
+      "Chinese"
     ],
     "preferred_boroughs": [],
     "budget": "$$",
@@ -48,6 +62,23 @@
       }
     ],
     "created_at": "2026-04-14T21:23:23",
-    "updated_at": "2026-04-14T22:56:27"
+    "updated_at": "2026-04-22T22:44:26"
+  },
+  "testuserauth": {
+    "id": "testuserauth",
+    "name": "TestUserAuth",
+    "survey_completed": false,
+    "favorite_cuisines": [],
+    "preferred_boroughs": [],
+    "budget": "$$",
+    "min_grade": "B",
+    "spice_tolerance": 3,
+    "adventurousness": 3,
+    "favorite_vibes": [],
+    "likes": [],
+    "created_at": "2026-04-22T22:35:45",
+    "updated_at": "2026-04-22T22:35:45",
+    "password_hash": "aac426561310205a88aa3e9e0d4e263b2a2792b3b0c6aa223f2e3a412c54a654",
+    "salt": "e09b045550c636ac7b2454e5feace12e"
   }
 }

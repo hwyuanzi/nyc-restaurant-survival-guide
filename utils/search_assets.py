@@ -9,9 +9,9 @@ from utils.search import build_description, get_embeddings, neighborhood_from_zi
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 CACHE_DIR = DATA_DIR / "cache"
-DEFAULT_SEARCH_SAMPLE_SIZE = 750
+DEFAULT_SEARCH_SAMPLE_SIZE = 3800
 BASE_DATASET_LIMIT = 8000
-PREPARED_DATASET_VERSION = 3
+PREPARED_DATASET_VERSION = 4
 
 
 def _prepared_df_path(sample_size):
@@ -54,23 +54,25 @@ def load_prepared_search_assets(sample_size=DEFAULT_SEARCH_SAMPLE_SIZE, force_re
     enriched_df = get_enriched_restaurants(base_df, sample_size, api_key, force_refresh=force_refresh)
     prepared_df = base_df.copy()
 
-    if not enriched_df.empty:
-        enrichment_columns = [
-            "camis",
-            "g_rating",
-            "g_reviews",
-            "g_price",
-            "g_summary",
-            "g_photo_ref",
-            "g_maps_url",
-            "g_place_id",
-        ]
-        available_columns = [column for column in enrichment_columns if column in enriched_df.columns]
-        enriched_subset = (
-            enriched_df[available_columns]
-            .drop_duplicates(subset=["camis"], keep="first")
-        )
-        prepared_df = prepared_df.merge(enriched_subset, on="camis", how="left")
+    if enriched_df.empty:
+        return pd.DataFrame(), None, {"prepared": False, "sample_size": sample_size}
+
+    enrichment_columns = [
+        "camis",
+        "g_rating",
+        "g_reviews",
+        "g_price",
+        "g_summary",
+        "g_photo_ref",
+        "g_maps_url",
+        "g_place_id",
+    ]
+    available_columns = [column for column in enrichment_columns if column in enriched_df.columns]
+    enriched_subset = (
+        enriched_df[available_columns]
+        .drop_duplicates(subset=["camis"], keep="first")
+    )
+    prepared_df = prepared_df.merge(enriched_subset, on="camis", how="left")
 
     required_google_columns = ["g_rating", "g_reviews", "g_price", "g_place_id"]
     available_required_columns = [column for column in required_google_columns if column in prepared_df.columns]
@@ -105,9 +107,14 @@ def build_runtime_restaurant_df(prepared_df):
     runtime_df["lat"] = pd.to_numeric(runtime_df.get("lat", runtime_df.get("latitude")), errors="coerce")
     runtime_df["lng"] = pd.to_numeric(runtime_df.get("lon", runtime_df.get("longitude")), errors="coerce")
     runtime_df["cuisine_type"] = runtime_df["cuisine"]
-    runtime_df["price_tier"] = pd.to_numeric(runtime_df.get("g_price", 2), errors="coerce").fillna(2).clip(1, 4).astype(int)
-    runtime_df["avg_rating"] = pd.to_numeric(runtime_df.get("g_rating", 3.0), errors="coerce").fillna(3.0)
-    runtime_df["review_count"] = pd.to_numeric(runtime_df.get("g_reviews", 0), errors="coerce").fillna(0).astype(int)
+    g_price_series = runtime_df.get("g_price", pd.Series(2, index=runtime_df.index))
+    runtime_df["price_tier"] = pd.to_numeric(g_price_series, errors="coerce").fillna(2).clip(1, 4).astype(int)
+    
+    g_rating_series = runtime_df.get("g_rating", pd.Series(3.0, index=runtime_df.index))
+    runtime_df["avg_rating"] = pd.to_numeric(g_rating_series, errors="coerce").fillna(3.0)
+    
+    g_reviews_series = runtime_df.get("g_reviews", pd.Series(0, index=runtime_df.index))
+    runtime_df["review_count"] = pd.to_numeric(g_reviews_series, errors="coerce").fillna(0).astype(int)
     if "neighborhood" not in runtime_df.columns:
         runtime_df["neighborhood"] = runtime_df.get("zipcode", pd.Series([""] * len(runtime_df), index=runtime_df.index)).apply(neighborhood_from_zipcode)
     return runtime_df

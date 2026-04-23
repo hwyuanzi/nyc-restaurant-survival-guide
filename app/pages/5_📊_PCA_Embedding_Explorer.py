@@ -16,6 +16,10 @@ from utils.user_profile import init_session_state, predict_user_cluster, render_
 st.set_page_config(page_title="PCA Embedding Explorer", page_icon="📊", layout="wide")
 apply_apple_theme()
 init_session_state()
+
+from utils.auth import require_auth
+require_auth()
+
 CLUSTER_HEX = [
     "#6c8fff", "#ff9f43", "#6dda7f", "#ff6b8a",
     "#b983ff", "#ffd32a", "#48dbfb", "#ff6348",

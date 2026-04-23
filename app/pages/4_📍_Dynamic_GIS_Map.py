@@ -11,6 +11,10 @@ from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
 from utils.user_profile import init_session_state, predict_user_cluster
 
 init_session_state()
+
+from utils.auth import require_auth
+require_auth()
+
 try:
     import pydeck as pdk
     PYDECK_OK = True

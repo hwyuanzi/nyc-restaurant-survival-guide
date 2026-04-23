@@ -22,6 +22,9 @@ st.set_page_config(
 apply_apple_theme()
 init_session_state()
 
+from utils.auth import require_auth
+require_auth()
+
 EXAMPLES = [
     "cozy Italian pasta spot in Brooklyn",
     "late night ramen and dumplings Manhattan",
@@ -80,11 +83,18 @@ def render_card(row, api_key, profile_name, rank):
         with action_col:
             if maps_url:
                 st.markdown(f"[📍 Open in Google Maps]({maps_url})")
-            if st.button("Like this restaurant", key=f"search_like_{rank}_{row.get('camis', name)}"):
-                if add_liked_restaurant(profile_name, row, source="semantic_search"):
-                    st.success("Saved to your profile.")
-                else:
-                    st.info("Already saved in your profile.")
+            
+            from utils.user_profile import is_restaurant_liked, remove_liked_restaurant
+            if is_restaurant_liked(profile_name, row):
+                if st.button("❤️ Unlike this restaurant", key=f"search_unlike_{rank}_{row.get('camis', name)}"):
+                    if remove_liked_restaurant(profile_name, row):
+                        st.success("Removed from your profile.")
+                        st.rerun()
+            else:
+                if st.button("🤍 Like this restaurant", key=f"search_like_{rank}_{row.get('camis', name)}"):
+                    if add_liked_restaurant(profile_name, row, source="semantic_search"):
+                        st.success("Saved to your profile.")
+                        st.rerun()
     st.divider()
 
 

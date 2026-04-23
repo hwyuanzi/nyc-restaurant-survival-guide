@@ -14,6 +14,10 @@ from utils.user_profile import get_profile, init_session_state, predict_user_clu
 st.set_page_config(page_title="Cluster-Based Recommendations", page_icon="🔮", layout="wide")
 apply_apple_theme()
 init_session_state()
+
+from utils.auth import require_auth
+require_auth()
+
 st.title("🔮 Cluster-Based Recommendations")
 st.markdown("Restaurants recommended based on your taste cluster profile.")
 

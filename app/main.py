@@ -35,6 +35,41 @@ st.set_page_config(
 apply_apple_theme()
 init_session_state()
 
+from utils.auth import authenticate_user, register_user
+
+if "authenticated_profile_id" not in st.session_state:
+    st.session_state["authenticated_profile_id"] = None
+
+if not st.session_state["authenticated_profile_id"]:
+    st.title("🍽️ NYC Restaurant Survival Guide")
+    st.markdown("Please log in or create an account to start searching and saving your favorite restaurants.")
+    
+    tab_login, tab_signup = st.tabs(["Login", "Sign Up"])
+    
+    with tab_login:
+        login_username = st.text_input("Username", key="login_username")
+        login_password = st.text_input("Password", type="password", key="login_password")
+        if st.button("Login", use_container_width=True):
+            success, profile_id = authenticate_user(login_username, login_password)
+            if success:
+                st.session_state["authenticated_profile_id"] = profile_id
+                st.rerun()
+            else:
+                st.error("Invalid username or password. (If you have an old account without a password, try logging in with an empty password.)")
+                
+    with tab_signup:
+        signup_username = st.text_input("Choose a Username", key="signup_username")
+        signup_password = st.text_input("Choose a Password", type="password", key="signup_password")
+        if st.button("Sign Up", use_container_width=True):
+            success, result = register_user(signup_username, signup_password)
+            if success:
+                st.success("Account created! Logging you in...")
+                st.session_state["authenticated_profile_id"] = result
+                st.rerun()
+            else:
+                st.error(result)
+    st.stop()
+
 
 def render_card(row, api_key, profile_name, rank):
     pct = int(row.get("match_percent", round(row["similarity"] * 100)))
@@ -80,11 +115,18 @@ def render_card(row, api_key, profile_name, rank):
         with action_col:
             if maps_url:
                 st.markdown(f"[📍 Open in Google Maps]({maps_url})")
-            if st.button("Like this restaurant", key=f"home_like_{rank}_{row.get('camis', name)}"):
-                if add_liked_restaurant(profile_name, row, source="home_search"):
-                    st.success("Saved to your profile.")
-                else:
-                    st.info("Already saved in your profile.")
+            
+            from utils.user_profile import is_restaurant_liked, remove_liked_restaurant
+            if is_restaurant_liked(profile_name, row):
+                if st.button("❤️ Unlike this restaurant", key=f"home_unlike_{rank}_{row.get('camis', name)}"):
+                    if remove_liked_restaurant(profile_name, row):
+                        st.success("Removed from your profile.")
+                        st.rerun()
+            else:
+                if st.button("🤍 Like this restaurant", key=f"home_like_{rank}_{row.get('camis', name)}"):
+                    if add_liked_restaurant(profile_name, row, source="home_search"):
+                        st.success("Saved to your profile.")
+                        st.rerun()
     st.divider()
 
 

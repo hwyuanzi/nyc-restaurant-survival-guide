@@ -379,31 +379,17 @@ def render_profile_sidebar():
         save_profiles(profiles)
 
     profile_ids = list(profiles.keys())
-    if st.session_state["active_profile_id"] not in profiles:
-        st.session_state["active_profile_id"] = profile_ids[0]
+    if st.session_state.get("authenticated_profile_id") not in profiles:
+        # Fallback if somehow they are authenticated but profile is missing
+        st.session_state["authenticated_profile_id"] = profile_ids[0]
 
-    profile_labels = {profile_id: profiles[profile_id]["name"] for profile_id in profile_ids}
-    current_index = profile_ids.index(st.session_state["active_profile_id"])
+    st.session_state["active_profile_id"] = st.session_state["authenticated_profile_id"]
+    active_name = profiles[st.session_state["active_profile_id"]]["name"]
 
-    st.title("👤 Your Profile")
-    selected_profile_id = st.selectbox(
-        "Choose a profile",
-        options=profile_ids,
-        format_func=lambda profile_id: profile_labels.get(profile_id, profile_id),
-        index=current_index,
-    )
-    st.session_state["active_profile_id"] = selected_profile_id
-
-    new_profile_name = st.text_input("Create a new profile", placeholder="e.g. Rahul")
-    if st.button("Create / switch profile", use_container_width=True):
-        clean_name = new_profile_name.strip() or "Guest"
-        new_profile = _default_profile(name=clean_name, profile_id=_slugify(clean_name))
-        existing = find_profile_by_name(clean_name)
-        if existing:
-            st.session_state["active_profile_id"] = existing["id"]
-        else:
-            upsert_profile(new_profile)
-            st.session_state["active_profile_id"] = new_profile["id"]
+    st.title(f"👤 Welcome, {active_name}")
+    
+    if st.button("Logout", use_container_width=True):
+        st.session_state["authenticated_profile_id"] = None
         st.rerun()
 
     profile = get_profile(profile_id=st.session_state["active_profile_id"])
@@ -496,5 +482,57 @@ def add_liked_restaurant(profile_name, restaurant_row, source="app"):
     profiles[profile_id] = profile
     save_profiles(profiles)
 
+    st.session_state["user_history"] = profile_to_user_history(profile)
+    return True
+
+
+def is_restaurant_liked(profile_name, restaurant_row):
+    profile = get_profile(name=profile_name)
+    likes = profile.get("likes", [])
+    camis = restaurant_row.get("camis") or restaurant_row.get("restaurant_id")
+    restaurant_id = str(
+        restaurant_row.get("restaurant_id")
+        or restaurant_row.get("camis")
+        or restaurant_row.get("g_place_id")
+        or restaurant_row.get("dba")
+    )
+    camis_text = str(camis).strip() if camis is not None and str(camis).strip() else ""
+    return any(
+        str(item.get("restaurant_id")) == restaurant_id
+        or (camis_text and str(item.get("camis", "")).strip() == camis_text)
+        for item in likes
+    )
+
+
+def remove_liked_restaurant(profile_name, restaurant_row):
+    profiles = load_profiles()
+    profile = get_profile(name=profile_name)
+    profile_id = profile["id"]
+    likes = profile.get("likes", [])
+
+    camis = restaurant_row.get("camis") or restaurant_row.get("restaurant_id")
+    restaurant_id = str(
+        restaurant_row.get("restaurant_id")
+        or restaurant_row.get("camis")
+        or restaurant_row.get("g_place_id")
+        or restaurant_row.get("dba")
+    )
+    camis_text = str(camis).strip() if camis is not None and str(camis).strip() else ""
+
+    new_likes = [
+        item for item in likes
+        if not (
+            str(item.get("restaurant_id")) == restaurant_id
+            or (camis_text and str(item.get("camis", "")).strip() == camis_text)
+        )
+    ]
+    
+    if len(new_likes) == len(likes):
+        return False
+        
+    profile["likes"] = new_likes
+    profile["updated_at"] = _now_iso()
+    profiles[profile_id] = profile
+    save_profiles(profiles)
     st.session_state["user_history"] = profile_to_user_history(profile)
     return True

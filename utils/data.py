@@ -11,7 +11,7 @@ def load_nyc_base(limit=8000):
         "$limit": limit,
         "$where": "grade IN('A','B','C') AND cuisine_description IS NOT NULL AND dba IS NOT NULL",
         "$select": "camis,dba,boro,building,street,zipcode,cuisine_description,grade,score,latitude,longitude",
-        "$order": "grade ASC",
+        "$order": "grade ASC, camis ASC",
     }
 
     response = requests.get(NYC_DOHMH_API, params=params, timeout=30)
