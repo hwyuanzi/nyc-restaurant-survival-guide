@@ -201,7 +201,7 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    k = st.slider("Number of Clusters (K)", 4, 16, st.session_state.get("optimal_k", 8))
+    k = st.slider("Number of Clusters (K)", 4, 16, st.session_state.get("optimal_k", 10))
 
     if st.button("🔄 Re-run Clustering"):
         st.session_state["clustered_df"] = None

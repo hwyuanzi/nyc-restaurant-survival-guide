@@ -52,7 +52,7 @@ with st.sidebar:
     st.session_state["user_history"] = profile_to_user_history(profile, raw_df)
     st.markdown("---")
     st.markdown("### Clustering Controls")
-    k = st.slider("Number of Clusters (K)", 4, 16, st.session_state.get("optimal_k", 8))
+    k = st.slider("Number of Clusters (K)", 4, 16, st.session_state.get("optimal_k", 10))
 
     if st.button("🔄 Re-run Clustering"):
         st.session_state["clustered_df"] = None
