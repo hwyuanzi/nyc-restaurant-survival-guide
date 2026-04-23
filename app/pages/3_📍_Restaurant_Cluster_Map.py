@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-from utils.clustering import get_clustered_data, find_optimal_k
+from utils.clustering import get_clustered_data, find_optimal_k, compute_silhouette
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
 from utils.user_profile import init_session_state, predict_user_cluster
 
@@ -40,8 +40,16 @@ CLUSTER_COLORS = [
     [129, 140, 248, 200],
 ]
 
+ALGO_OPTIONS = {
+    "K-Means (fast, spherical clusters)": "kmeans",
+    "Gaussian Mixture (tied cov., elliptical soft clusters)": "gmm",
+    "Hierarchical / Ward (merges by variance)": "agglomerative",
+}
+
 st.title("📍 Restaurant Cluster GIS Map")
-st.markdown("Restaurants colored by K-Means cluster on a real NYC map.")
+st.markdown("Restaurants colored by cluster on a real NYC map.  Switch the "
+            "clustering algorithm in the sidebar to see how the geometry of "
+            "the feature space changes the groupings.")
 
 if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
     with st.spinner("Loading prepared restaurant data..."):
@@ -57,6 +65,25 @@ user_history = st.session_state["user_history"]
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### Clustering Controls")
+    algo_label = st.radio(
+        "Algorithm",
+        list(ALGO_OPTIONS.keys()),
+        help=(
+            "KMeans minimises Euclidean variance within each cluster — fast "
+            "and tends to produce spherical groups.  GMM models each cluster "
+            "as a Gaussian (tied covariance shares one shape across "
+            "components).  Hierarchical / Ward greedily merges the pair of "
+            "clusters that minimises total within-cluster variance, which "
+            "often produces more natural groupings on mixed feature types."
+        ),
+    )
+    algorithm = ALGO_OPTIONS[algo_label]
+    if st.session_state.get("active_cluster_algorithm") != algorithm:
+        # Algorithm changed — drop the cached clustered_df so the new algo runs.
+        st.session_state["clustered_df"] = None
+        st.session_state["kmeans_model"] = None
+        st.session_state["active_cluster_algorithm"] = algorithm
+
     k = st.slider("Number of Clusters (K)", 4, 16, st.session_state["optimal_k"])
     cluster_filter_placeholder = st.empty()
 
@@ -87,9 +114,13 @@ MAP_STYLES = {
 }
 
 # ── Run clustering ────────────────────────────────────────────────────────────
-with st.spinner("Running K-Means clustering..."):
-    cdf, kmeans, scaler, pca = get_clustered_data(raw_df, user_history, k=k,
-                                                   force=(st.session_state["clustered_df"] is None))
+algo_display = {v: k_ for k_, v in ALGO_OPTIONS.items()}[algorithm]
+with st.spinner(f"Running {algo_display}..."):
+    cdf, kmeans, scaler, pca = get_clustered_data(
+        raw_df, user_history, k=k,
+        force=(st.session_state["clustered_df"] is None),
+        algorithm=algorithm,
+    )
     st.session_state["clustered_df"] = cdf
     st.session_state["kmeans_model"] = kmeans
     st.session_state["scaler"]       = scaler
@@ -103,6 +134,46 @@ if predicted_cluster != -1:
     cl_label = cdf[cdf["cluster_id"] == predicted_cluster]["cluster_label"].iloc[0]
     n_match  = len(cdf[cdf["cluster_id"] == predicted_cluster])
     st.success(f"🎯 Based on your history, you belong to **{cl_label}** — {n_match} restaurants match your taste profile.")
+
+# ── Algorithm comparison expander ────────────────────────────────────────────
+with st.expander("🔬 Compare clustering algorithms on this dataset"):
+    st.caption(
+        "Silhouette score measures how tight clusters are (higher = better, "
+        "−1 to 1).  Label diversity is a rough interpretability proxy — the "
+        "top 3 auto-generated cluster labels by restaurant count.  All three "
+        "algorithms cluster the same 22-dim interpretable feature space."
+    )
+    run_compare = st.button("Run comparison (≈30s–1min)")
+    if run_compare:
+        comparison_rows = []
+        progress = st.progress(0.0, text="Starting…")
+        algos_to_run = [("kmeans", "K-Means"), ("gmm", "GMM (tied)"),
+                        ("agglomerative", "Hierarchical (Ward)")]
+        for i, (algo_key, algo_name) in enumerate(algos_to_run):
+            progress.progress(i / len(algos_to_run), text=f"Running {algo_name}…")
+            try:
+                summary = compute_silhouette(raw_df, user_history, algo_key, k=k)
+                comparison_rows.append({
+                    "Algorithm": algo_name,
+                    "Silhouette": round(summary["silhouette"], 4),
+                    "Clusters": summary["n_clusters"],
+                    "Top labels": " · ".join(summary["top_labels"]),
+                })
+            except Exception as exc:
+                comparison_rows.append({
+                    "Algorithm": algo_name,
+                    "Silhouette": float("nan"),
+                    "Clusters": 0,
+                    "Top labels": f"⚠️ error: {exc}",
+                })
+        progress.progress(1.0, text="Done.")
+        st.session_state["cluster_comparison"] = comparison_rows
+    if st.session_state.get("cluster_comparison"):
+        df_cmp = pd.DataFrame(st.session_state["cluster_comparison"])
+        st.dataframe(df_cmp, use_container_width=True, hide_index=True)
+        best = df_cmp.loc[df_cmp["Silhouette"].idxmax(), "Algorithm"] if not df_cmp["Silhouette"].isna().all() else None
+        if best:
+            st.caption(f"Best by silhouette on K={k}: **{best}**")
 
 # ── Prepare map data ──────────────────────────────────────────────────────────
 map_df = cdf.dropna(subset=["lat", "lng"]).copy()
