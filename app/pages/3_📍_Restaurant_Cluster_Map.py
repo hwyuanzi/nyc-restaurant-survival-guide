@@ -6,10 +6,18 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
+from app.ui_utils import apply_apple_theme
 from utils.clustering import get_clustered_data, find_optimal_k, compute_silhouette
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
 from utils.user_profile import init_session_state, predict_user_cluster
 
+st.set_page_config(
+    page_title="Restaurant Cluster Map",
+    page_icon="📍",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+apply_apple_theme()
 init_session_state()
 
 from utils.auth import require_auth

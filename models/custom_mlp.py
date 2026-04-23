@@ -271,7 +271,84 @@ def evaluate_mlp(model: nn.Module, X_test: torch.Tensor, y_test: torch.Tensor,
 
 
 # ---------------------------------------------------------------------------
-# 3. Hyperparameter search (justifies our choice of hidden/lr/dropout)
+# 3. Feature importance (from scratch — no attribution library needed)
+# ---------------------------------------------------------------------------
+
+def compute_gradient_importance(
+    model: nn.Module,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    feature_names: Optional[list] = None,
+):
+    """Input-gradient feature importance: mean |∂L/∂x_j| over all samples.
+
+    We treat the cross-entropy loss as a function of the raw input and compute
+    its gradient with respect to every input dimension via a single backward
+    pass.  The mean absolute gradient per dimension measures how sensitively
+    the loss responds to small perturbations in that feature — a standard
+    first-order attribution method implemented entirely in PyTorch.
+
+    Returns a pd.Series indexed by feature_names if provided, else np.ndarray.
+    """
+    import pandas as pd
+    model.eval()
+    X_g = X.float().clone().detach().requires_grad_(True)
+    criterion = nn.CrossEntropyLoss()
+    loss = criterion(model(X_g), y)
+    loss.backward()
+    importance = X_g.grad.abs().mean(dim=0).detach().cpu().numpy()
+    if feature_names is not None:
+        return pd.Series(importance, index=feature_names)
+    return importance
+
+
+def compute_permutation_importance(
+    model: nn.Module,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    feature_names: Optional[list] = None,
+    n_repeats: int = 10,
+    seed: int = 42,
+):
+    """Permutation feature importance: mean drop in weighted F1 when feature j
+    is randomly shuffled n_repeats times.
+
+    Positive = feature is informative (shuffling it hurts F1).
+    Near-zero or negative = the model does not rely on it.
+
+    This is a model-agnostic method: it makes no assumptions about model
+    internals and works by directly measuring prediction quality degradation.
+    Implemented from scratch with PyTorch / NumPy — no sklearn wrapper.
+
+    Parameters
+    ----------
+    n_repeats : int
+        Permutations per feature (reduces variance of the estimate).
+    seed : int
+        NumPy RNG seed for reproducibility.
+    """
+    import numpy as np
+    import pandas as pd
+    model.eval()
+    baseline_f1, _ = evaluate_mlp(model, X, y)
+    rng = np.random.default_rng(seed)
+    n_features = X.shape[1]
+    drops = np.zeros((n_features, n_repeats), dtype=np.float64)
+    for j in range(n_features):
+        for r in range(n_repeats):
+            X_perm = X.clone()
+            idx = torch.from_numpy(rng.permutation(X.shape[0]).astype(np.int64))
+            X_perm[:, j] = X_perm[idx, j]
+            perm_f1, _ = evaluate_mlp(model, X_perm, y)
+            drops[j, r] = baseline_f1 - perm_f1
+    mean_drops = drops.mean(axis=1)
+    if feature_names is not None:
+        return pd.Series(mean_drops, index=feature_names)
+    return mean_drops
+
+
+# ---------------------------------------------------------------------------
+# 4. Hyperparameter search (justifies our choice of hidden/lr/dropout)
 # ---------------------------------------------------------------------------
 
 def hyperparameter_search(X_train: torch.Tensor,
@@ -343,7 +420,7 @@ def hyperparameter_search(X_train: torch.Tensor,
 
 
 # ---------------------------------------------------------------------------
-# 4. Counterfactual explanation (what would flip this restaurant to Grade A?)
+# 5. Counterfactual explanation (what would flip this restaurant to Grade A?)
 # ---------------------------------------------------------------------------
 
 def find_counterfactual(model: nn.Module,
