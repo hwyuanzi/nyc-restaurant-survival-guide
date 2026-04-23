@@ -400,6 +400,7 @@ if rec_method.startswith("Per-liked"):
         k_per_liked=30,
         k_final=50,
         scaler=scaler,
+        profile=profile,
     )
     if len(candidates) > 0:
         cand_matrix = np.vstack([
@@ -418,6 +419,7 @@ else:
         visited_ids=liked_ids,
         k=15,
         scaler=scaler,
+        profile=profile,
     )
     recs["primary_influencer"] = "Profile preferences"
 
