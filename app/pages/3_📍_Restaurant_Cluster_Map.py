@@ -5,16 +5,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.metrics import silhouette_score
 
-from utils.clustering import (
-    apply_user_weights,
-    build_feature_matrix,
-    find_optimal_k,
-    get_clustered_data,
-    prepare_clustering_space,
-    run_clustering,
-)
+from utils.clustering import get_clustered_data, find_optimal_k, compute_silhouette
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
 from utils.user_profile import init_session_state, predict_user_cluster
 
@@ -48,31 +40,16 @@ CLUSTER_COLORS = [
     [129, 140, 248, 200],
 ]
 
-st.title("📍 Restaurant Cluster GIS Map")
-st.markdown("Restaurants colored by interpretable taste clusters on a real NYC map.")
-
-ALGORITHM_OPTIONS = [
-    ("KMeans", "kmeans"),
-    ("GMM (tied covariance)", "gmm"),
-    ("Hierarchical (Ward)", "agglomerative"),
-]
-ALGO_HELP = {
-    "kmeans": "KMeans: fast and stable when clusters are approximately spherical.",
-    "gmm": "GMM: soft probabilistic membership and elliptical clusters via tied covariance.",
-    "agglomerative": "Hierarchical (Ward): bottom-up grouping that can better follow non-spherical structure.",
+ALGO_OPTIONS = {
+    "K-Means (fast, spherical clusters)": "kmeans",
+    "Gaussian Mixture (tied cov., elliptical soft clusters)": "gmm",
+    "Hierarchical / Ward (merges by variance)": "agglomerative",
 }
 
-default_algo = st.session_state.get("clustering_algorithm", "kmeans")
-default_algo_idx = [key for _, key in ALGORITHM_OPTIONS].index(default_algo) if default_algo in [key for _, key in ALGORITHM_OPTIONS] else 0
-algorithm_label = st.radio(
-    "Clustering algorithm",
-    options=[label for label, _ in ALGORITHM_OPTIONS],
-    index=default_algo_idx,
-    horizontal=True,
-)
-algorithm_key = dict(ALGORITHM_OPTIONS)[algorithm_label]
-st.session_state["clustering_algorithm"] = algorithm_key
-st.caption(ALGO_HELP[algorithm_key])
+st.title("📍 Restaurant Cluster GIS Map")
+st.markdown("Restaurants colored by cluster on a real NYC map.  Switch the "
+            "clustering algorithm in the sidebar to see how the geometry of "
+            "the feature space changes the groupings.")
 
 if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
     with st.spinner("Loading prepared restaurant data..."):
@@ -88,6 +65,25 @@ user_history = st.session_state["user_history"]
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### Clustering Controls")
+    algo_label = st.radio(
+        "Algorithm",
+        list(ALGO_OPTIONS.keys()),
+        help=(
+            "KMeans minimises Euclidean variance within each cluster — fast "
+            "and tends to produce spherical groups.  GMM models each cluster "
+            "as a Gaussian (tied covariance shares one shape across "
+            "components).  Hierarchical / Ward greedily merges the pair of "
+            "clusters that minimises total within-cluster variance, which "
+            "often produces more natural groupings on mixed feature types."
+        ),
+    )
+    algorithm = ALGO_OPTIONS[algo_label]
+    if st.session_state.get("active_cluster_algorithm") != algorithm:
+        # Algorithm changed — drop the cached clustered_df so the new algo runs.
+        st.session_state["clustered_df"] = None
+        st.session_state["kmeans_model"] = None
+        st.session_state["active_cluster_algorithm"] = algorithm
+
     k = st.slider("Number of Clusters (K)", 4, 16, st.session_state["optimal_k"])
     cluster_filter_placeholder = st.empty()
 
@@ -117,15 +113,12 @@ MAP_STYLES = {
 }
 
 # ── Run clustering ────────────────────────────────────────────────────────────
-last_algo = st.session_state.get("cluster_cache_algorithm")
-algorithm_changed = last_algo != algorithm_key
-with st.spinner(f"Running {algorithm_label} clustering..."):
-    cdf, cluster_model, scaler, pca = get_clustered_data(
-        raw_df,
-        user_history,
-        k=k,
-        algorithm=algorithm_key,
-        force=(st.session_state["clustered_df"] is None or algorithm_changed),
+algo_display = {v: k_ for k_, v in ALGO_OPTIONS.items()}[algorithm]
+with st.spinner(f"Running {algo_display}..."):
+    cdf, kmeans, scaler, pca = get_clustered_data(
+        raw_df, user_history, k=k,
+        force=(st.session_state["clustered_df"] is None),
+        algorithm=algorithm,
     )
     st.session_state["clustered_df"] = cdf
     st.session_state["kmeans_model"] = cluster_model
@@ -142,52 +135,45 @@ if predicted_cluster != -1:
     n_match  = len(cdf[cdf["cluster_id"] == predicted_cluster])
     st.success(f"🎯 Based on your history, you belong to **{cl_label}** — {n_match} restaurants match your taste profile.")
 
-with st.expander("Compare silhouette"):
-    st.caption("Run all three clustering methods on the same feature space and compare separation quality.")
-    if st.button("Run silhouette comparison", key="run_silhouette_comparison"):
-        X_base, _, _ = build_feature_matrix(raw_df)
-        X_aug = apply_user_weights(X_base, raw_df, user_history)
-        _, X_cluster_eval, _ = prepare_clustering_space(X_aug, fit=True)
-
-        rows = []
-        for label, algo in ALGORITHM_OPTIONS:
-            cmp_df, _, _, _ = run_clustering(raw_df, user_history, k=k, algorithm=algo)
-            labels_vec = cmp_df["cluster_id"].values
-            score = -1.0
-            if len(np.unique(labels_vec)) > 1:
-                try:
-                    score = float(
-                        silhouette_score(
-                            X_cluster_eval,
-                            labels_vec,
-                            sample_size=min(1500, len(X_cluster_eval)),
-                            random_state=42,
-                        )
-                    )
-                except Exception:
-                    score = -1.0
-
-            top_labels = (
-                cmp_df.groupby("cluster_label")["restaurant_id"]
-                .count()
-                .sort_values(ascending=False)
-                .head(3)
-                .index.tolist()
-            )
-            rows.append(
-                {
-                    "Algorithm": label,
-                    "Silhouette": score,
-                    "Clusters": int(cmp_df["cluster_id"].nunique()),
-                    "Top-3 Cluster Labels": ", ".join(top_labels),
-                }
-            )
-
-        st.dataframe(
-            pd.DataFrame(rows).sort_values("Silhouette", ascending=False),
-            use_container_width=True,
-            hide_index=True,
-        )
+# ── Algorithm comparison expander ────────────────────────────────────────────
+with st.expander("🔬 Compare clustering algorithms on this dataset"):
+    st.caption(
+        "Silhouette score measures how tight clusters are (higher = better, "
+        "−1 to 1).  Label diversity is a rough interpretability proxy — the "
+        "top 3 auto-generated cluster labels by restaurant count.  All three "
+        "algorithms cluster the same 22-dim interpretable feature space."
+    )
+    run_compare = st.button("Run comparison (≈30s–1min)")
+    if run_compare:
+        comparison_rows = []
+        progress = st.progress(0.0, text="Starting…")
+        algos_to_run = [("kmeans", "K-Means"), ("gmm", "GMM (tied)"),
+                        ("agglomerative", "Hierarchical (Ward)")]
+        for i, (algo_key, algo_name) in enumerate(algos_to_run):
+            progress.progress(i / len(algos_to_run), text=f"Running {algo_name}…")
+            try:
+                summary = compute_silhouette(raw_df, user_history, algo_key, k=k)
+                comparison_rows.append({
+                    "Algorithm": algo_name,
+                    "Silhouette": round(summary["silhouette"], 4),
+                    "Clusters": summary["n_clusters"],
+                    "Top labels": " · ".join(summary["top_labels"]),
+                })
+            except Exception as exc:
+                comparison_rows.append({
+                    "Algorithm": algo_name,
+                    "Silhouette": float("nan"),
+                    "Clusters": 0,
+                    "Top labels": f"⚠️ error: {exc}",
+                })
+        progress.progress(1.0, text="Done.")
+        st.session_state["cluster_comparison"] = comparison_rows
+    if st.session_state.get("cluster_comparison"):
+        df_cmp = pd.DataFrame(st.session_state["cluster_comparison"])
+        st.dataframe(df_cmp, use_container_width=True, hide_index=True)
+        best = df_cmp.loc[df_cmp["Silhouette"].idxmax(), "Algorithm"] if not df_cmp["Silhouette"].isna().all() else None
+        if best:
+            st.caption(f"Best by silhouette on K={k}: **{best}**")
 
 # ── Prepare map data ──────────────────────────────────────────────────────────
 map_df = cdf.dropna(subset=["lat", "lng"]).copy()

@@ -279,12 +279,25 @@ predicted_cluster = predict_user_cluster(user_history, cdf, cluster_model, scale
 st.session_state["predicted_cluster"] = predicted_cluster
 
 # ── K-NN Recommendation Engine ────────────────────────────────────────────────
+from utils.clustering import (
+    build_feature_matrix,
+    build_user_feature_vector,
+    recommend_knn,
+    recommend_per_liked_knn,
+    apply_mmr,
+    collect_liked_vectors,
+    TOP_CUISINES,
+    BOROUGH_LIST,
+)
+import plotly.graph_objects as go
+
 st.markdown("---")
 st.subheader("🧠 Your Taste Profile")
 
 # Build the user feature vector and restaurant feature matrix
 X_restaurants, feature_columns, df_feat = build_feature_matrix(raw_df)
 user_vec = build_user_feature_vector(profile, raw_df)
+liked_vectors, liked_metadata = collect_liked_vectors(profile, X_restaurants, df_feat)
 
 if X_restaurants.shape[0] == 0:
     st.warning("No restaurants are available in the current dataset slice, so recommendations cannot be generated yet.")
@@ -305,99 +318,112 @@ p4.metric("Boroughs", ", ".join(pref_boroughs[:2]) if pref_boroughs else "All NY
 if n_likes == 0 and not pref_cuisines:
     st.info("💡 Like some restaurants or set your cuisine preferences in the sidebar to get personalized recommendations. Showing top-rated restaurants for now.")
 
-# Recommendation method controls
-st.markdown("---")
-method = st.radio(
-    "Recommendation method",
-    options=["Per-liked KNN + MMR (default)", "Profile-average KNN (legacy)"],
-    index=0,
-    horizontal=True,
-)
-mmr_lambda = st.slider(
-    "MMR λ (relevance ↔ diversity)",
-    min_value=0.3,
-    max_value=1.0,
-    value=0.7,
-    step=0.05,
-    help="Lower λ increases diversity; λ=1.0 disables diversity reranking.",
-)
-
+# Run K-NN with the selected method
 visited_ids = {str(v) for v in user_history.get("visited_ids", [])}
-liked_ids, liked_name_by_id = resolve_liked_ids_and_names(profile, df_feat)
-liked_rows = df_feat[df_feat["restaurant_id"].astype(str).isin(liked_ids)]
-liked_vectors = X_restaurants[liked_rows.index.values]
-liked_ids_aligned = liked_rows["restaurant_id"].astype(str).tolist()
 
-if method.startswith("Per-liked"):
+st.markdown("---")
+st.subheader("⚙️ Recommendation Method")
+method_col, lambda_col = st.columns([1.1, 1])
+with method_col:
+    rec_method = st.radio(
+        "Algorithm",
+        [
+            "Per-liked KNN + MMR (recommended)",
+            "Profile-averaged KNN (legacy)",
+        ],
+        help=(
+            "**Per-liked KNN + MMR** runs cosine KNN separately from each "
+            "liked restaurant, fuses the rankings via Reciprocal Rank Fusion, "
+            "then re-ranks the top-50 with Maximal Marginal Relevance so the "
+            "final list isn't dominated by one cuisine.  "
+            "**Profile-averaged KNN** collapses all likes into a single mean "
+            "vector and picks top-K by cosine similarity — simpler but "
+            "dilutes diverse tastes."
+        ),
+    )
+with lambda_col:
+    if rec_method.startswith("Per-liked"):
+        mmr_lambda = st.slider(
+            "MMR balance (λ)",
+            min_value=0.0, max_value=1.0, value=0.7, step=0.05,
+            help=(
+                "λ = 1.0 → pure relevance (may repeat similar picks).  "
+                "λ = 0.0 → pure diversity (may include weaker matches).  "
+                "0.7 is a standard default."
+            ),
+        )
+    else:
+        mmr_lambda = 1.0
+
+if rec_method.startswith("Per-liked"):
     candidates = recommend_per_liked_knn(
         liked_vectors=liked_vectors,
         profile_vector=user_vec,
         restaurant_matrix=X_restaurants,
         restaurant_df=df_feat,
         visited_ids=visited_ids,
+        liked_metadata=liked_metadata,
         k_per_liked=30,
         k_final=50,
         scaler=scaler,
-        liked_ids=liked_ids_aligned,
     )
-
-    if candidates.empty:
-        recs = candidates
-    else:
-        matrix_lookup = pd.Series(np.arange(len(df_feat)), index=df_feat["restaurant_id"].astype(str))
-        candidate_indices = [int(matrix_lookup[str(rid)]) for rid in candidates["restaurant_id"].astype(str)]
-        candidate_matrix_raw = X_restaurants[candidate_indices]
-        candidate_matrix_scaled = scale_recommendation_vectors(candidate_matrix_raw, scaler=scaler)
-        user_vec_scaled = scale_recommendation_vectors(user_vec, scaler=scaler)[0]
+    if len(candidates) > 0:
+        cand_matrix = np.vstack([
+            X_restaurants[df_feat.index[df_feat["restaurant_id"].astype(str) == str(rid)][0]]
+            for rid in candidates["restaurant_id"].astype(str)
+        ])
         recs = apply_mmr(
-            candidates_df=candidates,
-            candidate_matrix=candidate_matrix_scaled,
-            user_vector=user_vec_scaled,
-            k=15,
-            lambda_=mmr_lambda,
+            candidates, cand_matrix,
+            user_vector=user_vec, k=15, lambda_=mmr_lambda, scaler=scaler,
         )
+    else:
+        recs = candidates
 else:
     recs = recommend_knn(
-        user_vec,
-        X_restaurants,
-        df_feat,
+        user_vec, X_restaurants, df_feat,
         visited_ids=visited_ids,
         k=15,
         scaler=scaler,
     )
-    recs["primary_influencer_id"] = None
-    recs["primary_influencer_idx"] = -1
-
-if "primary_influencer_id" in recs.columns:
-    recs["primary_influencer_name"] = recs["primary_influencer_id"].map(liked_name_by_id).fillna("")
-else:
-    recs["primary_influencer_name"] = ""
+    recs["primary_influencer"] = "Profile preferences"
 
 # ── Recommendation cards ──────────────────────────────────────────────────────
+st.markdown("---")
 st.subheader("🎯 Recommended Restaurants")
-if method.startswith("Per-liked"):
-    st.caption("Candidates are fused across each liked restaurant using reciprocal-rank fusion, then MMR reranks for diversity.")
-else:
-    st.caption("Legacy baseline: profile-average cosine KNN in interpretable feature space.")
+st.caption(
+    "Restaurants ranked by cosine similarity to your taste profile in the "
+    "interpretable 22-dim feature space (price, cuisine, borough, rating, "
+    "health, location).  The *Influenced by* column shows which liked "
+    "restaurant contributed each pick's best rank under RRF."
+)
 
 if recs.empty:
     st.info("No unvisited restaurants found. Try clearing your visit history or adjusting preferences.")
 else:
-    cuisine_diversity = int(recs["cuisine_type"].fillna("Unknown").nunique())
-    st.metric("Cuisine diversity (top 15)", f"{cuisine_diversity} unique cuisines")
+    unique_cuisines = recs["cuisine_type"].fillna("Other").nunique()
+    unique_boroughs = recs["boro"].fillna("NYC").nunique()
+    d1, d2, d3 = st.columns(3)
+    d1.metric("Cuisine diversity", f"{unique_cuisines} unique")
+    d2.metric("Borough coverage", f"{unique_boroughs} / 5")
+    d3.metric("Method", "Per-liked + MMR" if rec_method.startswith("Per-liked") else "Profile avg.")
 
-    display_cols = ["name", "cuisine_type", "avg_rating", "price_tier", "boro", "knn_similarity"]
-    if "primary_influencer_name" in recs.columns:
-        display_cols.append("primary_influencer_name")
-    display_df = recs[display_cols].copy()
+    display_cols = ["name", "cuisine_type", "avg_rating", "price_tier", "boro",
+                    "knn_similarity", "primary_influencer"]
+    display_df = recs[[c for c in display_cols if c in recs.columns]].copy()
     display_df["avg_rating"] = display_df["avg_rating"].apply(lambda x: f"{x:.2f} ★")
     display_df["price_tier"] = display_df["price_tier"].apply(format_price_tier)
-    display_df["knn_similarity"] = display_df["knn_similarity"].apply(lambda x: f"{x:.3f}")
-    if "primary_influencer_name" in display_df.columns:
-        display_df["primary_influencer_name"] = display_df["primary_influencer_name"].replace("", "—")
-        display_df.columns = ["Restaurant", "Cuisine", "Rating", "Price", "Borough", "Similarity", "Because you liked"]
-    else:
-        display_df.columns = ["Restaurant", "Cuisine", "Rating", "Price", "Borough", "Similarity"]
+    if "knn_similarity" in display_df.columns:
+        display_df["knn_similarity"] = display_df["knn_similarity"].apply(lambda x: f"{x:.3f}")
+    rename_map = {
+        "name": "Restaurant",
+        "cuisine_type": "Cuisine",
+        "avg_rating": "Rating",
+        "price_tier": "Price",
+        "boro": "Borough",
+        "knn_similarity": "Similarity",
+        "primary_influencer": "Influenced by",
+    }
+    display_df = display_df.rename(columns=rename_map)
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
     # Expandable detail cards for top 5
@@ -405,7 +431,14 @@ else:
     st.subheader("Top 5 Picks — Why These?")
     for i, (_, row) in enumerate(recs.head(5).iterrows()):
         sim_score = row.get("knn_similarity", 0)
+        influencer = row.get("primary_influencer", "Profile preferences")
         with st.expander(f"#{i+1} — {row.get('name', 'Unknown')} (Similarity: {sim_score:.3f})"):
+            st.markdown(
+                f"<span style='background:#E8F0FE; color:#1D4ED8; "
+                f"padding:2px 8px; border-radius:999px; font-size:12px;'>"
+                f"Because you liked: {influencer}</span>",
+                unsafe_allow_html=True,
+            )
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Cuisine", row.get("cuisine_type", "—"))
             col2.metric("Rating", f"{row.get('avg_rating', 0):.2f} ★")
