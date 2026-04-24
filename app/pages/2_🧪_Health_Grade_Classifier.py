@@ -31,15 +31,7 @@ import torch
 from sklearn.model_selection import train_test_split
 
 from app.ui_utils import apply_apple_theme
-from models.custom_mlp import (
-    CustomMLP,
-    TrainingHistory,
-    compute_gradient_importance,
-    compute_permutation_importance,
-    evaluate_mlp,
-    find_counterfactual,
-    train_mlp,
-)
+from models.custom_mlp import CustomMLP, TrainingHistory, evaluate_mlp, train_mlp
 from utils.user_profile import init_session_state
 
 
@@ -79,16 +71,6 @@ HISTORY_CACHE_PATH = DATA_DIR / "cache" / "health_classifier_history.json"
 GRADE_NAMES = ["A", "B", "C"]
 GRADE_COLORS = {"A": "#34C759", "B": "#FFCC00", "C": "#FF3B30"}
 
-FEATURE_DISPLAY_NAMES = {
-    "latest_score": "Most-recent inspection score",
-    "avg_score": "Average score across all inspections",
-    "max_score": "Worst-ever inspection score",
-    "num_inspections": "Total number of inspections on record",
-    "num_violations": "Total violation rows on record",
-    "critical_ratio": "Critical-violation ratio",
-    "violations_per_inspection": "Violations per inspection",
-}
-
 
 if not all(p.exists() for p in [TRAIN_PATH, TEST_PATH, META_TEST_PATH, CONFIG_PATH]):
     st.error(
@@ -110,9 +92,6 @@ def load_prepared_data():
 
 train_df, test_df, meta_test, feature_config = load_prepared_data()
 feature_cols = [c for c in feature_config["feature_columns"] if c in train_df.columns]
-numerical_features = feature_config["numerical_features"]
-scaler_mean = np.array(feature_config["scaler_mean"], dtype=np.float32)
-scaler_scale = np.array(feature_config["scaler_scale"], dtype=np.float32)
 input_dim = len(feature_cols)
 
 
@@ -139,24 +118,6 @@ def get_tensors():
 
 
 tensors = get_tensors()
-
-
-# ---------------------------------------------------------------------------
-# Data-driven slider bounds
-# ---------------------------------------------------------------------------
-
-@st.cache_data(show_spinner=False)
-def compute_slider_ranges():
-    """Return {feature_name: (lo, hi)} using training-set percentiles in raw units."""
-    raw = train_df[numerical_features].values * scaler_scale + scaler_mean
-    lo = np.maximum(0.0, np.percentile(raw, 1, axis=0))
-    hi = np.percentile(raw, 99, axis=0)
-    ranges = {name: (float(lo[i]), float(hi[i])) for i, name in enumerate(numerical_features)}
-    ranges["critical_ratio"] = (0.0, 1.0)
-    return ranges
-
-
-slider_ranges = compute_slider_ranges()
 
 
 # ---------------------------------------------------------------------------
@@ -221,79 +182,11 @@ def get_model():
 model, training_history = get_model()
 
 
-# ---------------------------------------------------------------------------
-# Feature importance + sandbox feature-vector helpers
-# ---------------------------------------------------------------------------
-
-@st.cache_resource(show_spinner="Computing feature importance on held-out test set...")
-def get_feature_importance():
-    """Return (grad_imp, perm_imp) as pd.Series indexed by feature_cols."""
-    grad = compute_gradient_importance(
-        model,
-        tensors["X_test"],
-        tensors["y_test"],
-        feature_names=feature_cols,
-    )
-    perm = compute_permutation_importance(
-        model,
-        tensors["X_test"],
-        tensors["y_test"],
-        feature_names=feature_cols,
-        n_repeats=10,
-        seed=42,
-    )
-    return grad, perm
-
-
-grad_imp, perm_imp = get_feature_importance()
-
-_num_perm = perm_imp[numerical_features].clip(lower=0)
-_num_perm_norm = (_num_perm / _num_perm.max()) if _num_perm.max() > 0 else _num_perm
-
-
-def _importance_badge(feature_name: str) -> str:
-    """Return a short importance label for each sandbox slider."""
-    score = float(_num_perm_norm.get(feature_name, 0.0))
-    if score >= 0.60:
-        return "★★★ High impact"
-    if score >= 0.25:
-        return "★★ Medium impact"
-    return "★ Low impact"
-
-
-def standardise_numerical(raw_values: np.ndarray) -> np.ndarray:
-    """Apply the preprocess.py StandardScaler to a raw numerical vector."""
-    return (raw_values - scaler_mean) / scaler_scale
-
-
-def build_feature_vector(raw_numerical: dict, boro: str, cuisine_group: str) -> np.ndarray:
-    """Assemble a single input vector matching feature_config['feature_columns']."""
-    vec = np.zeros(input_dim, dtype=np.float32)
-
-    raw = np.array([raw_numerical[c] for c in numerical_features], dtype=np.float32)
-    scaled = standardise_numerical(raw)
-
-    for name, value in zip(numerical_features, scaled):
-        if name in feature_cols:
-            vec[feature_cols.index(name)] = value
-
-    boro_key = f"boro_{boro}"
-    if boro_key in feature_cols:
-        vec[feature_cols.index(boro_key)] = 1.0
-
-    cuisine_key = f"cuisine_{cuisine_group}"
-    if cuisine_key in feature_cols:
-        vec[feature_cols.index(cuisine_key)] = 1.0
-    elif "cuisine_Other" in feature_cols:
-        vec[feature_cols.index("cuisine_Other")] = 1.0
-
-    return vec
-
-
-def predict_single(feature_vec: np.ndarray):
+def predict_grade(feature_row: np.ndarray):
+    """Run one row (already in the model's 29-d feature space) through the MLP."""
     model.eval()
     with torch.no_grad():
-        logits = model(torch.from_numpy(feature_vec.astype(np.float32)).unsqueeze(0))
+        logits = model(torch.from_numpy(feature_row.astype(np.float32)).unsqueeze(0))
         probs = torch.softmax(logits, dim=1).numpy()[0]
     return probs
 
@@ -312,18 +205,13 @@ st.info(
 
 
 # ---------------------------------------------------------------------------
-# Section 1 — Live Prediction Sandbox
+# Section 1 — Pick a restaurant & predict
 # ---------------------------------------------------------------------------
 
-st.subheader("1️⃣ Live Prediction Sandbox")
-st.caption(
-    "Pick a restaurant, drag the inspection-feature sliders, and watch the predicted "
-    "grade update."
-)
+st.subheader("1️⃣ Pick a Restaurant")
 
 query = st.text_input(
     "Search by name, borough, or cuisine",
-    value="",
     placeholder="e.g. pizza · Queens · Joe's",
 )
 
@@ -343,171 +231,85 @@ if filtered.empty:
     st.stop()
 
 selection = st.dataframe(
-    filtered[["dba", "boro", "cuisine_description", "grade"]].rename(
-        columns={
-            "dba": "Restaurant",
-            "boro": "Borough",
-            "cuisine_description": "Cuisine",
-            "grade": "Current Grade",
-        }
-    ),
-    use_container_width=True,
-    hide_index=True,
-    selection_mode="single-row",
-    on_select="rerun",
-    height=260,
+    filtered[["dba", "boro", "cuisine_description", "grade"]].rename(columns={
+        "dba": "Restaurant", "boro": "Borough",
+        "cuisine_description": "Cuisine", "grade": "Actual Grade",
+    }),
+    use_container_width=True, hide_index=True,
+    selection_mode="single-row", on_select="rerun", height=300,
 )
 
 if selection.selection.rows:
     selected = filtered.iloc[selection.selection.rows[0]]
 else:
     selected = filtered.iloc[0]
-    st.caption("👆 Click a row to pick a different restaurant. Showing the first row by default.")
+    st.caption("👆 Click a row to pick a different restaurant.  Showing the first row by default.")
 
-# Find this restaurant's row in the test set to seed the sliders.
-test_row = test_df.loc[meta_test["camis"].astype(str).eq(str(selected["camis"])).values]
-if test_row.empty:
+
+# Look up this restaurant's row in the feature matrix
+test_row_df = test_df[meta_test["camis"] == selected["camis"]]
+if test_row_df.empty:
     st.error("Could not find the feature row for this restaurant. Try another one.")
     st.stop()
 
-# Recover the RAW, unstandardized numerical values by inverting the scaler.
-scaled_vals = test_row[numerical_features].values[0].astype(np.float32)
-raw_vals = scaled_vals * scaler_scale + scaler_mean
-initial = dict(zip(numerical_features, raw_vals))
+feature_row = test_row_df[feature_cols].values[0]
+true_grade = selected["grade"]
 
-st.divider()
 
-col_left, col_right = st.columns([1.15, 1])
+# ---------------------------------------------------------------------------
+# Section 2 — Prediction result
+# ---------------------------------------------------------------------------
 
-available_cuisines = sorted(
-    c.replace("cuisine_", "") for c in feature_cols if c.startswith("cuisine_")
-)
-available_boros = sorted(
-    c.replace("boro_", "") for c in feature_cols if c.startswith("boro_")
-)
+st.subheader("2️⃣ Classifier Prediction")
 
-with col_left:
-    st.markdown(f"#### 🛠️ Sandbox: {selected['dba']}")
-    st.caption(
-        f"{selected['boro']} · {selected['cuisine_description']} · "
-        f"Ground-truth grade: **{selected['grade']}**"
+probs = predict_grade(feature_row)
+pred_idx = int(np.argmax(probs))
+pred_grade = GRADE_NAMES[pred_idx]
+is_correct = pred_grade == true_grade
+
+col_info, col_chart = st.columns([1, 1.1])
+
+with col_info:
+    st.markdown(f"**Restaurant:** {selected['dba']}")
+    st.markdown(f"**Borough / Cuisine:** {selected['boro']} · {selected['cuisine_description']}")
+    st.markdown("---")
+
+    # Big predicted grade card
+    color = GRADE_COLORS[pred_grade]
+    st.markdown(
+        f"""
+        <div style='
+            background: {color}22;
+            border: 2px solid {color};
+            border-radius: 14px;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 16px;'>
+            <div style='font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1px;'>
+                Predicted grade
+            </div>
+            <div style='font-size: 72px; font-weight: 700; color: {color}; line-height: 1;'>
+                {pred_grade}
+            </div>
+            <div style='font-size: 16px; color: #444; margin-top: 6px;'>
+                Confidence: <b>{probs[pred_idx] * 100:.1f}%</b>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    sb = {}
-
-    def _clamp(val, lo, hi):
-        return float(np.clip(val, lo, hi))
-
-    r = slider_ranges
-
-    sb["latest_score"] = st.slider(
-        f"Most-recent inspection score  [{_importance_badge('latest_score')}]",
-        r["latest_score"][0],
-        r["latest_score"][1],
-        _clamp(initial["latest_score"], *r["latest_score"]),
-        help="DOHMH cutoffs: A ≤ 13, B 14–27, C ≥ 28. This is the single strongest predictor of grade.",
-    )
-    sb["critical_ratio"] = st.slider(
-        f"Critical-violation ratio  [{_importance_badge('critical_ratio')}]",
-        0.0,
-        1.0,
-        _clamp(initial["critical_ratio"], 0.0, 1.0),
-        step=0.01,
-        help="Fraction of recorded violations flagged Critical. Critical violations carry the heaviest regulatory weight.",
-    )
-    sb["violations_per_inspection"] = st.slider(
-        f"Violations per inspection  [{_importance_badge('violations_per_inspection')}]",
-        r["violations_per_inspection"][0],
-        r["violations_per_inspection"][1],
-        _clamp(initial["violations_per_inspection"], *r["violations_per_inspection"]),
-        help="Average number of violations found each visit, normalized for inspection frequency.",
-    )
-    sb["avg_score"] = st.slider(
-        f"Average score across all inspections  [{_importance_badge('avg_score')}]",
-        r["avg_score"][0],
-        r["avg_score"][1],
-        _clamp(initial["avg_score"], *r["avg_score"]),
-        help="Mean score across the restaurant's full inspection history.",
-    )
-    sb["num_inspections"] = st.slider(
-        f"Total number of inspections on record  [{_importance_badge('num_inspections')}]",
-        r["num_inspections"][0],
-        r["num_inspections"][1],
-        _clamp(initial["num_inspections"], *r["num_inspections"]),
-        help="More inspections mean richer history for the model to use.",
-    )
-    sb["num_violations"] = st.slider(
-        f"Total violation rows on record  [{_importance_badge('num_violations')}]",
-        r["num_violations"][0],
-        r["num_violations"][1],
-        _clamp(initial["num_violations"], *r["num_violations"]),
-        help="Raw count of violation rows. Largely captured by violations_per_inspection; included for completeness.",
-    )
-    sb["max_score"] = st.slider(
-        f"Worst-ever inspection score  [{_importance_badge('max_score')}]",
-        r["max_score"][0],
-        r["max_score"][1],
-        _clamp(initial["max_score"], *r["max_score"]),
-        help="Peak score across all inspections.",
-    )
-
-    boro_choice = st.selectbox(
-        "Borough",
-        available_boros,
-        index=available_boros.index(selected["boro"]) if selected["boro"] in available_boros else 0,
-    )
-
-    best_cuisine = selected["cuisine_description"]
-    if best_cuisine not in available_cuisines:
-        best_cuisine = "Other" if "Other" in available_cuisines else available_cuisines[0]
-    cuisine_choice = st.selectbox(
-        "Cuisine group",
-        available_cuisines,
-        index=available_cuisines.index(best_cuisine),
-    )
-
-with col_right:
-    feature_vec = build_feature_vector(sb, boro_choice, cuisine_choice)
-    probs = predict_single(feature_vec)
-    pred_idx = int(np.argmax(probs))
-    pred_grade = GRADE_NAMES[pred_idx]
-
-    st.session_state["classifier_sandbox"] = {
-        "camis": str(selected.get("camis", "")),
-        "dba": str(selected.get("dba", "Sandbox restaurant")),
-        "feature_vec": feature_vec.copy(),
-        "raw_numerical": dict(sb),
-        "boro": boro_choice,
-        "cuisine": cuisine_choice,
-    }
-
-    st.markdown(f"#### 🧠 Predicted Grade: **{pred_grade}**")
-    if pred_grade == "A":
-        st.success(
-            f"🎉 **Congratulations!** This restaurant is predicted to maintain a "
-            f"**Grade A**. Confidence: {probs[0] * 100:.1f}%"
-        )
-        st.markdown(
-            "Keep up the excellent hygiene standards. Continue routine inspections "
-            "and maintain current operational practices."
-        )
-    elif pred_grade == "B":
-        st.warning(
-            f"⚠️ **At Risk — Grade B predicted.** Confidence: {probs[1] * 100:.1f}%"
-        )
-        st.markdown(
-            "This restaurant has areas that need improvement. Review the guidance "
-            "below to understand what changes could earn a Grade A."
-        )
+    st.markdown(f"**Actual grade on record:** **{true_grade}**")
+    if is_correct:
+        st.success(f"✅ Correct — the classifier matched the DOHMH grade.")
     else:
-        st.error(
-            f"🚨 **Critical — Grade C predicted.** Confidence: {probs[2] * 100:.1f}%"
-        )
-        st.markdown(
-            "**Multiple areas need immediate attention.** A Grade C indicates serious "
-            "hygiene concerns. See the specific changes needed below."
+        st.warning(
+            f"⚠️ Classifier predicted **{pred_grade}**, actual grade is **{true_grade}**.  "
+            f"The model is right about {'85%' if training_history.best_val_f1 > 0.8 else '75%'} of the time on held-out data — "
+            "individual misses like this are expected.  See the Model Performance panel below."
         )
 
+with col_chart:
     prob_fig = go.Figure(go.Bar(
         x=[f"Grade {g}" for g in GRADE_NAMES],
         y=list(probs),
@@ -516,77 +318,13 @@ with col_right:
         textposition="outside",
     ))
     prob_fig.update_layout(
-        yaxis=dict(range=[0, 1.05], title="P(class)"),
-        height=240,
-        margin=dict(l=20, r=20, t=10, b=20),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        title="Class probabilities",
+        yaxis=dict(range=[0, 1.1], title="P(grade)"),
+        height=320, margin=dict(l=20, r=20, t=40, b=20),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font_family="Inter, -apple-system, sans-serif",
     )
     st.plotly_chart(prob_fig, use_container_width=True)
-
-    if pred_grade != "A":
-        st.markdown("##### 🎯 Improvement Guidance: How to Achieve Grade A")
-        with st.spinner("Computing actionable recommendations..."):
-            mutable = torch.zeros(input_dim)
-            for name in numerical_features:
-                mutable[feature_cols.index(name)] = 1.0
-
-            cf = find_counterfactual(
-                model,
-                torch.from_numpy(feature_vec).unsqueeze(0),
-                target_class=0,
-                steps=200,
-                lr=0.05,
-                l2_penalty=0.3,
-                mutable_mask=mutable.unsqueeze(0),
-            ).squeeze(0).numpy()
-
-            cf_raw = cf[:len(numerical_features)] * scaler_scale + scaler_mean
-
-            FEATURE_ACTION = {
-                "latest_score": "Penalty points from the most recent inspection. Reduce violations at the next visit.",
-                "avg_score": "Mean penalty score across all past inspections. Fix recurring violations to lower the long-run average.",
-                "max_score": "Highest single-inspection penalty score on record. Regular self-audits prevent catastrophic one-off failures.",
-                "num_violations": "Total violation citations ever recorded. Reduce frequency through hygiene training and standard operating procedures.",
-                "critical_ratio": "Share of violations flagged Critical. Eliminate these first because they carry the heaviest penalty.",
-                "violations_per_inspection": "Average violations per visit. Improve per-visit hygiene through staff checklists and training.",
-                "num_inspections": "Number of inspections on record; this reflects compliance history length and is not directly actionable.",
-            }
-
-            cf_rows = []
-            guidance_messages = []
-            for name, new_val in zip(numerical_features, cf_raw):
-                delta = new_val - sb[name]
-                if abs(delta) > 0.05 * max(abs(sb[name]), 1.0):
-                    display_name = FEATURE_DISPLAY_NAMES.get(name, name)
-                    direction_word = "Reduce" if delta < 0 else "Increase"
-                    arrow = "↓" if delta < 0 else "↑"
-                    cf_rows.append({
-                        "Feature": display_name,
-                        "Current": f"{sb[name]:.2f}",
-                        "Target": f"{new_val:.2f}",
-                        "Change": f"{arrow} {abs(delta):.2f}",
-                    })
-                    if name in FEATURE_ACTION:
-                        guidance_messages.append(
-                            f"**{arrow} {direction_word} '{display_name}': "
-                            f"{sb[name]:.1f} → {new_val:.1f}**  \n"
-                            f"{FEATURE_ACTION[name]}"
-                        )
-
-            if cf_rows:
-                st.dataframe(pd.DataFrame(cf_rows), use_container_width=True, hide_index=True)
-                st.caption(
-                    "↓ = needs to decrease · ↑ = needs to increase · "
-                    "Minimum perturbation via gradient descent on inputs, model weights frozen."
-                )
-                if guidance_messages:
-                    st.markdown("**What to change and why:**")
-                    for msg in guidance_messages:
-                        st.markdown(f"- {msg}")
-            else:
-                st.caption("The restaurant is already very close to the Grade-A decision boundary.")
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +332,7 @@ with col_right:
 # ---------------------------------------------------------------------------
 
 st.markdown("---")
-st.subheader("2️⃣ How Good is the Classifier?")
+st.subheader("3️⃣ How Good is the Classifier?")
 st.caption(
     f"Evaluated on the held-out test set: {len(test_df):,} restaurants the model "
     "has never seen during training, validation, or model selection."
