@@ -24,7 +24,7 @@ ALGO_CACHE_PATHS = {
     "agglomerative": ("data/cluster_cache_agglo.parquet", "data/cluster_model_agglo.joblib"),
 }
 CACHE_TTL  = 86400  # 24 hours
-CLUSTER_SCHEMA_VERSION = 21  # Bumped for rebalanced feature weights + min cluster size merge
+CLUSTER_SCHEMA_VERSION = 23  # Bumped: vibe/taste in cluster labels
 TSNE_MAX_ROWS = 3500
 
 try:
@@ -57,6 +57,12 @@ for _c in TOP_CUISINES:
 FEATURE_LABELS["cuisine_Other"] = "Cuisine: Other"
 for _b in ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]:
     FEATURE_LABELS[f"boro_{_b}"] = f"Borough: {_b}"
+TASTE_LABELS = ["spicy", "sweet", "savory", "fresh", "comforting", "smoky", "authentic"]
+VIBE_LABELS = ["cozy", "party", "romantic", "casual", "upscale", "trendy", "rustic"]
+for _t in TASTE_LABELS:
+    FEATURE_LABELS[f"taste_{_t}"] = f"Taste: {_t.title()}"
+for _v in VIBE_LABELS:
+    FEATURE_LABELS[f"vibe_{_v}"] = f"Vibe: {_v.title()}"
 
 
 def validate_dataframe(df: pd.DataFrame):
@@ -92,8 +98,58 @@ def _label_looks_internal(label):
     return not text or bool(re.match(r"^(cluster\s*\d+|\d+\b)", text, flags=re.IGNORECASE))
 
 
+def _dominant_vibe_taste(cluster_df: pd.DataFrame, full_df: pd.DataFrame | None = None,
+                         min_rate: float = 0.05, enrichment: float = 1.5):
+    """Return (top_vibe, top_taste) strings for a cluster's strongest signals.
+
+    A tag is "dominant" when:
+    1. Its mean in the cluster ≥ *min_rate* (absolute floor, default 5%).
+    2. Its mean in the cluster ≥ *enrichment* × the dataset-wide mean
+       (i.e. the tag is at least 1.5× more concentrated here than average).
+
+    If *full_df* is None the enrichment check is skipped and only the
+    absolute floor is used (backward-compatible fallback).
+    """
+    top_vibe, top_taste = None, None
+
+    def _best_tag(prefix):
+        cols = [c for c in cluster_df.columns if c.startswith(prefix)]
+        if not cols:
+            return None
+        means = cluster_df[cols].mean()
+        # Score each tag by enrichment ratio; fall back to absolute mean
+        # when full_df is unavailable.
+        scored = {}
+        for col in cols:
+            if means[col] < min_rate:
+                continue
+            if full_df is not None:
+                global_mean = full_df[col].mean() if col in full_df.columns else 0.0
+                if global_mean > 0:
+                    ratio = means[col] / global_mean
+                    if ratio < enrichment:
+                        continue
+                    scored[col] = ratio
+                else:
+                    scored[col] = float("inf")
+            else:
+                scored[col] = float(means[col])
+        if not scored:
+            return None
+        best = max(scored, key=scored.get)
+        return best.replace(prefix, "").title()
+
+    top_vibe = _best_tag("vibe_")
+    top_taste = _best_tag("taste_")
+    return top_vibe, top_taste
+
+
 def _assign_cluster_labels(df: pd.DataFrame):
-    """Generate unique, human-readable labels directly from interpretable features."""
+    """Generate unique, human-readable labels directly from interpretable features.
+
+    Uses cuisine, price, rating, borough, **and** dominant vibe/taste tags
+    to build candidate labels.  The first unique, non-internal candidate wins.
+    """
     label_map = {}
     used_labels = set()
 
@@ -116,8 +172,18 @@ def _assign_cluster_labels(df: pd.DataFrame):
         boro_counts = cluster_df["boro"].fillna("").astype(str).value_counts()
         top_boro = boro_counts.index[0] if not boro_counts.empty and boro_counts.index[0] not in ("", "0") else ""
 
+        # Dominant vibe / taste (use full df for relative enrichment)
+        top_vibe, top_taste = _dominant_vibe_taste(cluster_df, full_df=df)
+        vibe_taste_tag = " · ".join(filter(None, [top_vibe, top_taste]))
+
         # Build candidate labels in priority order
+        # Vibe/taste-enriched labels come first when a strong signal exists.
         candidates = []
+        if vibe_taste_tag and top_cuisine != "Mixed":
+            candidates.append(f"{vibe_taste_tag} {top_cuisine} · {rating_desc}")
+            candidates.append(f"{vibe_taste_tag} · {price_desc} {top_cuisine}")
+        if vibe_taste_tag:
+            candidates.append(f"{vibe_taste_tag} · {price_desc} {rating_desc}")
         if top_cuisine != "Mixed":
             candidates.append(f"{price_desc} {top_cuisine} · {rating_desc}")
             if top_boro:
@@ -146,6 +212,8 @@ def _feature_category(feature_name):
         return "Cuisine"
     if feature_name.startswith("boro_"):
         return "Borough"
+    if feature_name.startswith("taste_") or feature_name.startswith("vibe_"):
+        return "Vibe & Taste"
     if feature_name in {"price_norm"}:
         return "Price"
     if feature_name in {"rating_norm", "review_norm", "health_norm"}:
@@ -210,11 +278,15 @@ def _component_summary(component, feature_columns):
     return "Mixed restaurant attributes"
 
 
-def build_feature_matrix(df: pd.DataFrame):
+def build_feature_matrix(df: pd.DataFrame, use_location: bool = True):
     """Build a fully interpretable feature matrix for clustering.
 
     Every feature is human-readable: price, rating, review volume, health score,
     cuisine one-hot, borough one-hot, and normalized lat/lng.
+
+    When *use_location* is False the lat/lng and borough features are omitted,
+    producing a location-agnostic feature space focused on cuisine, quality,
+    price, vibe, and taste.
     """
     validate_dataframe(df)
     df = df.copy()
@@ -237,14 +309,6 @@ def build_feature_matrix(df: pd.DataFrame):
     health_source = pd.to_numeric(health_series, errors="coerce").fillna(21).clip(0, 42).values.reshape(-1, 1)
     health_norm = 1 - (health_source / 42.0)
 
-    # 5. Latitude / longitude (min-max normalized)
-    lat_vals = pd.to_numeric(df["lat"], errors="coerce").fillna(df["lat"].median()).values.reshape(-1, 1)
-    lng_vals = pd.to_numeric(df["lng"], errors="coerce").fillna(df["lng"].median()).values.reshape(-1, 1)
-    lat_min, lat_max = lat_vals.min(), lat_vals.max()
-    lng_min, lng_max = lng_vals.min(), lng_vals.max()
-    lat_norm = (lat_vals - lat_min) / (lat_max - lat_min) if lat_max > lat_min else np.zeros_like(lat_vals)
-    lng_norm = (lng_vals - lng_min) / (lng_max - lng_min) if lng_max > lng_min else np.zeros_like(lng_vals)
-
     # --- Categorical features (one-hot) ---
 
     # 6. Cuisine one-hot (top 10 + Other)
@@ -255,33 +319,65 @@ def build_feature_matrix(df: pd.DataFrame):
         fill_value=0,
     ).values.astype(np.float32)
 
-    # 7. Borough one-hot
-    boro_series = df["boro"].fillna("Unknown").astype(str)
-    boro_series = boro_series.where(boro_series.isin(["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]), other="Unknown")
-    boro_dummies = pd.get_dummies(boro_series, prefix="boro").reindex(
-        columns=[f"boro_{b}" for b in ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]],
-        fill_value=0,
-    ).values.astype(np.float32)
+    # --- Taste / Vibe features ---
+    taste_vibe_cols = [f"taste_{t}" for t in TASTE_LABELS] + [f"vibe_{v}" for v in VIBE_LABELS]
+    for col in taste_vibe_cols:
+        if col not in df.columns:
+            df[col] = 0
+    taste_vibe_vals = df[taste_vibe_cols].values.astype(np.float32)
 
-    # --- Assemble with feature weights ---
-    # Rebalanced so cuisine one-hots no longer dominate: price/rating/location
-    # carry more signal, cuisine is softened to avoid a catch-all "Other" mega-cluster.
-    X = np.hstack([
-        price_norm * 1.5,
-        rating_norm * 1.3,
-        review_norm * 0.7,
-        health_norm * 0.5,
-        lat_norm * 0.8,
-        lng_norm * 0.8,
-        cuisine_dummies * 0.8,
-        boro_dummies * 0.8,
-    ]).astype(np.float32)
+    if use_location:
+        # 5. Latitude / longitude (min-max normalized)
+        lat_vals = pd.to_numeric(df["lat"], errors="coerce").fillna(df["lat"].median()).values.reshape(-1, 1)
+        lng_vals = pd.to_numeric(df["lng"], errors="coerce").fillna(df["lng"].median()).values.reshape(-1, 1)
+        lat_min, lat_max = lat_vals.min(), lat_vals.max()
+        lng_min, lng_max = lng_vals.min(), lng_vals.max()
+        lat_norm = (lat_vals - lat_min) / (lat_max - lat_min) if lat_max > lat_min else np.zeros_like(lat_vals)
+        lng_norm = (lng_vals - lng_min) / (lng_max - lng_min) if lng_max > lng_min else np.zeros_like(lng_vals)
 
-    feature_columns = (
-        ["price_norm", "rating_norm", "review_norm", "health_norm", "lat_norm", "lng_norm"]
-        + [f"cuisine_{c}" for c in TOP_CUISINES] + ["cuisine_Other"]
-        + [f"boro_{b}" for b in ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]]
-    )
+        # 7. Borough one-hot
+        boro_series = df["boro"].fillna("Unknown").astype(str)
+        boro_series = boro_series.where(boro_series.isin(["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]), other="Unknown")
+        boro_dummies = pd.get_dummies(boro_series, prefix="boro").reindex(
+            columns=[f"boro_{b}" for b in ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]],
+            fill_value=0,
+        ).values.astype(np.float32)
+
+        X = np.hstack([
+            price_norm * 1.5,
+            rating_norm * 1.3,
+            review_norm * 0.7,
+            health_norm * 0.5,
+            lat_norm * 0.8,
+            lng_norm * 0.8,
+            cuisine_dummies * 0.8,
+            boro_dummies * 0.8,
+            taste_vibe_vals * 0.6,
+        ]).astype(np.float32)
+
+        feature_columns = (
+            ["price_norm", "rating_norm", "review_norm", "health_norm", "lat_norm", "lng_norm"]
+            + [f"cuisine_{c}" for c in TOP_CUISINES] + ["cuisine_Other"]
+            + [f"boro_{b}" for b in ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]]
+            + taste_vibe_cols
+        )
+    else:
+        # Location-agnostic: boost cuisine and vibe/taste weights to fill the
+        # variance gap left by removing 7 geo features.
+        X = np.hstack([
+            price_norm * 1.8,
+            rating_norm * 1.5,
+            review_norm * 0.8,
+            health_norm * 0.6,
+            cuisine_dummies * 1.0,
+            taste_vibe_vals * 1.0,
+        ]).astype(np.float32)
+
+        feature_columns = (
+            ["price_norm", "rating_norm", "review_norm", "health_norm"]
+            + [f"cuisine_{c}" for c in TOP_CUISINES] + ["cuisine_Other"]
+            + taste_vibe_cols
+        )
 
     return X, feature_columns, df
 
@@ -342,10 +438,11 @@ def prepare_clustering_space(X_aug: np.ndarray, scaler: StandardScaler | None = 
 
 
 def _cluster_signature(df: pd.DataFrame, user_history: dict, k: int,
-                       algorithm: str = "kmeans"):
+                       algorithm: str = "kmeans", use_location: bool = True):
     history_payload = {
         "schema_version": CLUSTER_SCHEMA_VERSION,
         "algorithm": algorithm,
+        "use_location": use_location,
         "visited_ids": sorted(str(value) for value in user_history.get("visited_ids", [])),
         "rated": {str(key): float(value) for key, value in sorted(user_history.get("rated", {}).items())},
         "cuisine_preferences": sorted(str(value) for value in user_history.get("cuisine_preferences", [])),
@@ -374,8 +471,9 @@ def find_optimal_k(X_scaled: np.ndarray, k_range=range(4, 16)) -> int:
     return best_k
 
 
-def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
-    X, feature_columns, df = build_feature_matrix(df)
+def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10,
+               use_location: bool = True):
+    X, feature_columns, df = build_feature_matrix(df, use_location=use_location)
     X_aug = apply_user_weights(X, df, user_history)
     projection_feature_columns = feature_columns + ["user_affinity"]
 
@@ -632,7 +730,8 @@ class _CentroidClusteringModel:
         return self.transform(X).argmin(axis=1)
 
 
-def run_gmm(df: pd.DataFrame, user_history: dict, k: int = 10):
+def run_gmm(df: pd.DataFrame, user_history: dict, k: int = 10,
+            use_location: bool = True):
     """Gaussian Mixture clustering with tied covariance.
 
     Tied covariance shares one covariance matrix across components, which
@@ -640,7 +739,7 @@ def run_gmm(df: pd.DataFrame, user_history: dict, k: int = 10):
     sizes and prevents the catch-all ``k=1`` collapse that full covariance
     sometimes produces on sparse one-hot features.
     """
-    X, feature_columns, df = build_feature_matrix(df)
+    X, feature_columns, df = build_feature_matrix(df, use_location=use_location)
     X_aug = apply_user_weights(X, df, user_history)
     projection_feature_columns = feature_columns + ["user_affinity"]
 
@@ -666,14 +765,15 @@ def run_gmm(df: pd.DataFrame, user_history: dict, k: int = 10):
     return df, wrapper, scaler, pca
 
 
-def run_agglomerative(df: pd.DataFrame, user_history: dict, k: int = 10):
+def run_agglomerative(df: pd.DataFrame, user_history: dict, k: int = 10,
+                      use_location: bool = True):
     """Agglomerative (Ward-linkage) hierarchical clustering.
 
     Ward minimises within-cluster variance at each merge, producing
     compact roughly-spherical clusters without the k-means init-sensitivity.
     Centroids are computed post-hoc as per-cluster means.
     """
-    X, feature_columns, df = build_feature_matrix(df)
+    X, feature_columns, df = build_feature_matrix(df, use_location=use_location)
     X_aug = apply_user_weights(X, df, user_history)
     projection_feature_columns = feature_columns + ["user_affinity"]
 
@@ -700,7 +800,7 @@ def run_agglomerative(df: pd.DataFrame, user_history: dict, k: int = 10):
 
 
 def run_clustering(df: pd.DataFrame, user_history: dict, k: int = 10,
-                   algorithm: str = "kmeans"):
+                   algorithm: str = "kmeans", use_location: bool = True):
     """Dispatcher that runs the selected clustering algorithm.
 
     All algorithms return a tuple with the same shape —
@@ -708,11 +808,11 @@ def run_clustering(df: pd.DataFrame, user_history: dict, k: int = 10,
     UI code does not need to special-case the algorithm.
     """
     if algorithm == "kmeans":
-        return run_kmeans(df, user_history, k)
+        return run_kmeans(df, user_history, k, use_location=use_location)
     if algorithm == "gmm":
-        return run_gmm(df, user_history, k)
+        return run_gmm(df, user_history, k, use_location=use_location)
     if algorithm == "agglomerative":
-        return run_agglomerative(df, user_history, k)
+        return run_agglomerative(df, user_history, k, use_location=use_location)
     raise ValueError(f"Unknown clustering algorithm: {algorithm!r}")
 
 
@@ -789,8 +889,9 @@ def save_cache(df, model, scaler, pca, signature, algorithm: str = "kmeans"):
 
 
 def get_clustered_data(df: pd.DataFrame, user_history: dict, k: int = 10,
-                       force: bool = False, algorithm: str = "kmeans"):
-    signature = _cluster_signature(df, user_history, k, algorithm)
+                       force: bool = False, algorithm: str = "kmeans",
+                       use_location: bool = True):
+    signature = _cluster_signature(df, user_history, k, algorithm, use_location=use_location)
     if not force and cache_is_fresh(algorithm):
         try:
             cached_df, cached_model, cached_scaler, cached_pca, cached_signature = load_cache(algorithm)
@@ -804,7 +905,8 @@ def get_clustered_data(df: pd.DataFrame, user_history: dict, k: int = 10,
         except Exception:
             # Corrupt or schema-mismatched cache — fall through to recompute.
             pass
-    result_df, model, scaler, pca = run_clustering(df, user_history, k, algorithm)
+    result_df, model, scaler, pca = run_clustering(df, user_history, k, algorithm,
+                                                    use_location=use_location)
     save_cache(result_df, model, scaler, pca, signature, algorithm)
     return result_df, model, scaler, pca
 

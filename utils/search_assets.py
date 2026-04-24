@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import pandas as pd
 import streamlit as st
@@ -117,6 +118,36 @@ def build_runtime_restaurant_df(prepared_df):
     runtime_df["review_count"] = pd.to_numeric(g_reviews_series, errors="coerce").fillna(0).astype(int)
     if "neighborhood" not in runtime_df.columns:
         runtime_df["neighborhood"] = runtime_df.get("zipcode", pd.Series([""] * len(runtime_df), index=runtime_df.index)).apply(neighborhood_from_zipcode)
+        
+    taste_synonyms = {
+        "spicy": ["spicy", "hot", "fiery", "kick"],
+        "sweet": ["sweet", "sugary", "dessert"],
+        "savory": ["savory", "rich", "umami"],
+        "fresh": ["fresh", "crisp", "vibrant"],
+        "comforting": ["comforting", "hearty", "warm", "homestyle"],
+        "smoky": ["smoky", "wood-fired", "charcoal", "bbq"],
+        "authentic": ["authentic", "traditional", "classic"],
+    }
+    vibe_synonyms = {
+        "cozy": ["cozy", "snug", "intimate", "warm"],
+        "party": ["party", "lively", "bustling", "loud", "energetic", "fun"],
+        "romantic": ["romantic", "date", "candlelit", "elegant"],
+        "casual": ["casual", "laid-back", "relaxed", "informal"],
+        "upscale": ["upscale", "fine dining", "premium", "fancy", "luxurious"],
+        "trendy": ["trendy", "hip", "modern", "stylish", "chic"],
+        "rustic": ["rustic", "vintage", "historic", "old-school"],
+    }
+    
+    summaries = runtime_df.get("g_summary", pd.Series([""] * len(runtime_df))).fillna("").astype(str).str.lower()
+    
+    for label, syns in taste_synonyms.items():
+        pattern = r"\b(?:{})\b".format("|".join(map(re.escape, syns)))
+        runtime_df[f"taste_{label}"] = summaries.str.contains(pattern, regex=True).astype(int)
+        
+    for label, syns in vibe_synonyms.items():
+        pattern = r"\b(?:{})\b".format("|".join(map(re.escape, syns)))
+        runtime_df[f"vibe_{label}"] = summaries.str.contains(pattern, regex=True).astype(int)
+
     return runtime_df
 
 

@@ -120,6 +120,7 @@ with st.spinner(f"Running {algo_display}..."):
         raw_df, user_history, k=k,
         force=(st.session_state["clustered_df"] is None),
         algorithm=algorithm,
+        use_location=False,
     )
     st.session_state["clustered_df"] = cdf
     st.session_state["kmeans_model"] = kmeans
@@ -276,6 +277,27 @@ for i, cid in enumerate(unique_clusters):
     top3   = subset["cuisine_type"].value_counts().head(3).index.tolist()
     avg_r  = subset["avg_rating"].mean()
 
+    # Collect dominant vibe/taste tags for this cluster (enrichment-based)
+    vibe_tags = []
+    taste_tags = []
+    min_rate = 0.05
+    enrichment_factor = 1.5
+    for vc in [c for c in subset.columns if c.startswith("vibe_")]:
+        cluster_mean = subset[vc].mean()
+        global_mean = cdf[vc].mean() if vc in cdf.columns else 0.0
+        if cluster_mean >= min_rate and (global_mean == 0 or cluster_mean >= enrichment_factor * global_mean):
+            vibe_tags.append(vc.replace("vibe_", "").title())
+    for tc in [c for c in subset.columns if c.startswith("taste_")]:
+        cluster_mean = subset[tc].mean()
+        global_mean = cdf[tc].mean() if tc in cdf.columns else 0.0
+        if cluster_mean >= min_rate and (global_mean == 0 or cluster_mean >= enrichment_factor * global_mean):
+            taste_tags.append(tc.replace("taste_", "").title())
+    tag_pills = ""
+    for tag in vibe_tags:
+        tag_pills += f'<span style="display:inline-block;background:#3d2963;color:#c9a0ff;padding:1px 6px;border-radius:10px;font-size:.68rem;margin:1px 2px">🎭 {tag}</span>'
+    for tag in taste_tags:
+        tag_pills += f'<span style="display:inline-block;background:#2a4035;color:#7ae8a0;padding:1px 6px;border-radius:10px;font-size:.68rem;margin:1px 2px">🍽 {tag}</span>'
+
     with col:
         st.markdown(f"""
         <div style="border-left: 4px solid {hex_c}; padding: 0.6rem 0.8rem;
@@ -283,6 +305,7 @@ for i, cid in enumerate(unique_clusters):
           <div style="font-weight:700; color:#e0e0f0">{label}</div>
           <div style="font-size:.78rem; color:#7a7a9a">{len(subset)} restaurants</div>
           <div style="font-size:.78rem; color:#a0a0c0">{", ".join(top3)}</div>
+          {f'<div style="margin-top:3px">{tag_pills}</div>' if tag_pills else ''}
           <div style="font-size:.78rem; color:#d19900">⭐ {avg_r:.2f}</div>
         </div>
         """, unsafe_allow_html=True)
