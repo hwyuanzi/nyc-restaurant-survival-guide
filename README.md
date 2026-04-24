@@ -275,6 +275,7 @@ nyc-restaurant-survival-guide/
 
 ### Step 1 — Clone the repository
 
+### Option A — pipenv (recommended)
 ```bash
 git clone https://github.com/hwyuanzi/nyc-restaurant-survival-guide.git
 cd nyc-restaurant-survival-guide
@@ -320,6 +321,7 @@ The app works out of the box without any API key — the repo ships with `data/c
 
 **Store it in one of two ways:**
 
+### Optional — rebuild the dataset from scratch
 ```bash
 # Environment variable (temporary — works for the current shell session)
 export GOOGLE_API_KEY="your_api_key_here"
@@ -340,6 +342,8 @@ pipenv run python data/download_data.py
 
 # Engineer features and create train/test splits
 pipenv run python data/preprocess.py
+# To rebuild the Google-enriched cache you need a Places API key
+# in .streamlit/secrets.toml (copy from .streamlit/secrets.toml.example)
 ```
 
 This generates `data/train.csv`, `data/test.csv`, `data/meta_train.csv`, `data/meta_test.csv`, and updates `data/feature_config.json`. The Health Grade Classifier will automatically retrain on the new data the next time it is loaded.
@@ -397,6 +401,22 @@ Expected: **10 tests, all passing** — covering the MLP (2 tests), Autoencoder 
 | **Data** | Pandas, NumPy, NYC DOHMH OpenData API (SODA), Google Places API |
 | **Testing** | Pytest |
 | **Language** | Python 3.10+ |
+
+---
+
+## Authors
+
+- **Hollan Yuan** — Initial project framework and architecture; Google
+  Places API integration and restaurant description generation that made
+  semantic search functional.
+- **Ryan Han(PapTR / Pap)** — NYC DOHMH Open Data integration and real
+  restaurant dataset; data preprocessing pipeline; pre-presentation
+  engineering: cache-first loading so the app runs without a Google API
+  key, persona-based cluster labels with narrative stories, cuisine-aware
+  recommendation ranking, simplified classifier UI, numpy 2 / pandas 3
+  compatibility debugging.
+- **Rahul Adusumalli** — Health-grade classifier work; cluster and
+  semantic-search refinements.
 
 ---
 

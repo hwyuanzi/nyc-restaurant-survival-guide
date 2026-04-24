@@ -493,6 +493,10 @@ focus_row = focus_df.iloc[0]
 
 label_prefix = "your current cluster" if predicted_cluster != -1 else "the largest cluster in the current analysis"
 st.info(f"Evidence for **{focus_row['cluster_label']}** ({label_prefix}): {focus_row.get('cluster_story', 'No explanation available.')}")
+if focus_row.get("cluster_cuisine_mix"):
+    st.caption(f"🍽️ Cuisine mix: {focus_row['cluster_cuisine_mix']}")
+if focus_row.get("cluster_boro_mix"):
+    st.caption(f"📍 Borough mix: {focus_row['cluster_boro_mix']}")
 if focus_row.get("cluster_key_drivers"):
     st.caption(f"Key drivers: {focus_row['cluster_key_drivers']}")
 

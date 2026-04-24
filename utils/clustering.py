@@ -1,3 +1,36 @@
+"""
+The problem we are fixing:
+  If a user likes 4 Chinese restaurants OR sets "Chinese" as a favorite cuisine,
+  the top-15 recommendations should be dominated by Chinese restaurants — not
+  Thai, Japanese, etc. that happen to match on price/rating/location.
+
+Root causes identified:
+  1. build_user_feature_vector normalizes the cuisine one-hot to sum=1, diluting
+     the Chinese signal when there are multiple likes.
+  2. Non-top-10 cuisines (Thai, Indian, Vietnamese, Korean, ...) all collapse
+     into the single "cuisine_Other" bucket.  If a Thai restaurant and a
+     Vietnamese restaurant both have cuisine_Other=1, they look identical on
+     the cuisine axis even though they are very different cuisines.
+  3. Price (× 1.5) and Rating (× 1.3) outweigh any individual cuisine dimension
+     (× 0.8), so a Thai restaurant with matching price/rating can beat a
+     Chinese restaurant with slightly mismatched price/rating.
+
+Fixes:
+  A. Strengthen the user's cuisine signal in build_user_feature_vector so a
+     single cuisine preference produces a full 1.0 in that dimension.
+  B. Add a cuisine_boost() post-filter: after K-NN returns top-N candidates,
+     boost restaurants whose cuisine matches either the user's favorite_cuisines
+     or the cuisines of their likes, and penalize mismatches.  This lives
+     *outside* the cosine similarity so we can tune it without retraining.
+  C. Keep the existing interpretable-feature cosine search for ranking within
+     a cuisine family (since that's still where price/rating/location matter).
+
+Paste these into utils/clustering.py, replacing:
+  - build_user_feature_vector  (lines ~1020-1112)
+  - recommend_per_liked_knn    (lines ~1177-1291)
+And add a new helper cuisine_score_boost() right before recommend_per_liked_knn.
+"""
+
 import os
 import time
 import json
@@ -182,82 +215,296 @@ def _select_cluster_drivers(feature_means: pd.Series, global_means: pd.Series):
 
     return drivers
 
+# --------------------------------------------------------------------------
+# Persona naming — combine signals into a short 2-3 word label
+# --------------------------------------------------------------------------
+
+def _price_persona(price):
+    """Price tier → 'Budget' / 'Mid-Range' / 'Upscale' / 'Luxury'."""
+    if pd.isna(price):
+        return None
+    if price <= 1.4:
+        return "Budget"
+    if price <= 2.0:
+        return "Mid-Range"
+    if price <= 2.8:
+        return "Upscale"
+    return "Luxury"
+
+
+def _rating_persona(rating, review_count_median):
+    """Rating + review signal → 'Hidden Gem' / 'Tourist Favorite' / ..."""
+    if pd.isna(rating):
+        return None
+    # High rating + low reviews = hidden gem
+    # High rating + high reviews = tourist favorite
+    # Low rating + high reviews = overexposed
+    # Low rating + low reviews = under-the-radar
+    if rating >= 4.4 and review_count_median < 150:
+        return "Hidden Gem"
+    if rating >= 4.4 and review_count_median >= 400:
+        return "Tourist Favorite"
+    if rating >= 4.2:
+        return "Highly Rated"
+    if rating >= 3.9:
+        return "Reliable"
+    if rating < 3.5 and review_count_median >= 400:
+        return "Overhyped"
+    return "Under-the-Radar"
+
+
+def _geographic_persona(boro_share, top_boro):
+    """Is this cluster geographically concentrated?"""
+    if boro_share >= 0.55 and top_boro and top_boro not in ("", "Unknown", "0"):
+        return top_boro
+    return None
+
+
+def _cuisine_persona(cuisine_counts, top_n=3):
+    """
+    Return (dominant_label, top_cuisines, is_mixed).
+    - If a single cuisine is >= 40%, dominant_label is that cuisine.
+    - If two cuisines dominate (>= 25% each), label is "A-B fusion crowd".
+    - Otherwise it's "Mixed Cuisine".
+    """
+    if cuisine_counts.empty:
+        return "Mixed Cuisine", [], True
+
+    top = cuisine_counts.head(top_n)
+    top_list = [(name, float(share)) for name, share in top.items()
+                if name and str(name).strip() not in ("", "0", "Other")]
+
+    if not top_list:
+        return "Mixed Cuisine", [], True
+
+    first_name, first_share = top_list[0]
+
+    if first_share >= 0.40:
+        # Single-cuisine dominant cluster
+        return first_name, top_list, False
+
+    if len(top_list) >= 2:
+        second_name, second_share = top_list[1]
+        if first_share >= 0.25 and second_share >= 0.20:
+            # Genuine mix of two cuisines (e.g. American 30% + Chinese 25%)
+            return f"{first_name} & {second_name}", top_list, True
+
+    # Broadly mixed — no single cuisine carries the cluster
+    return "Mixed Cuisine", top_list, True
 
 def _build_cluster_profiles(df: pd.DataFrame) -> pd.DataFrame:
-    """Generate concise labels plus centroid-based explanations per cluster."""
+    """Generate persona labels + narrative stories per cluster.
+ 
+    Output columns (unchanged so the rest of the app still works):
+        cluster_id, cluster_label, cluster_key_drivers, cluster_story
+    Extra columns added for richer UI (safe to ignore in older callers):
+        cluster_persona, cluster_cuisine_mix, cluster_boro_mix
+    """
+    # Import here to avoid a circular import with build_feature_matrix.
+    from utils.clustering import build_feature_matrix  # type: ignore
+ 
     if df.empty:
-        return pd.DataFrame(
-            columns=[
-                "cluster_id",
-                "cluster_label",
-                "cluster_key_drivers",
-                "cluster_story",
-            ]
-        )
-
+        return pd.DataFrame(columns=[
+            "cluster_id", "cluster_label", "cluster_key_drivers", "cluster_story",
+            "cluster_persona", "cluster_cuisine_mix", "cluster_boro_mix",
+        ])
+ 
     feature_matrix, feature_columns, aligned_df = build_feature_matrix(df)
-    feature_df = pd.DataFrame(feature_matrix, columns=feature_columns, index=aligned_df.index)
-    global_means = feature_df.mean(axis=0)
-
+    feature_df = pd.DataFrame(feature_matrix, columns=feature_columns,
+                              index=aligned_df.index)
+ 
+    # Global baselines — a cluster is "distinctive" relative to these.
+    global_rating = pd.to_numeric(df["avg_rating"], errors="coerce").mean()
+    global_price = pd.to_numeric(df["price_tier"], errors="coerce").mean()
+    global_reviews_med = pd.to_numeric(df["review_count"], errors="coerce").median()
+    global_health = pd.to_numeric(df.get("score", pd.Series(np.nan)),
+                                  errors="coerce").mean()
+ 
     profile_rows = []
-    used_labels = set()
-
+    used_labels: set[str] = set()
+ 
     for cluster_id in sorted(df["cluster_id"].unique()):
         cluster_df = df[df["cluster_id"] == cluster_id]
-        cluster_features = feature_df.loc[cluster_df.index]
-        feature_means = cluster_features.mean(axis=0)
-        drivers = _select_cluster_drivers(feature_means, global_means)
-
-        cuisine_counts = cluster_df["cuisine_type"].fillna("").astype(str).value_counts(normalize=True)
-        top_cuisine = cuisine_counts.index[0] if not cuisine_counts.empty and cuisine_counts.index[0] else ""
-        top_cuisine_share = float(cuisine_counts.iloc[0]) if not cuisine_counts.empty else 0.0
-
-        boro_counts = cluster_df["boro"].fillna("").astype(str).value_counts(normalize=True)
-        top_boro = boro_counts.index[0] if not boro_counts.empty and boro_counts.index[0] not in ("", "0") else ""
+        n = len(cluster_df)
+        if n == 0:
+            continue
+ 
+        # ---- Raw statistics ----
+        avg_rating = pd.to_numeric(cluster_df["avg_rating"],
+                                   errors="coerce").mean()
+        avg_price = pd.to_numeric(cluster_df["price_tier"],
+                                  errors="coerce").mean()
+        review_med = pd.to_numeric(cluster_df["review_count"],
+                                   errors="coerce").median()
+        avg_health = pd.to_numeric(cluster_df.get("score", pd.Series(np.nan,
+                                   index=cluster_df.index)), errors="coerce").mean()
+ 
+        # ---- Cuisine mix ----
+        cuisine_counts = (
+            cluster_df["cuisine_type"].fillna("")
+            .astype(str).str.strip()
+            .replace({"0": ""})
+            .value_counts(normalize=True)
+        )
+        cuisine_counts = cuisine_counts[cuisine_counts.index != ""]
+        cuisine_persona, top_cuisines, cuisine_is_mixed = _cuisine_persona(
+            cuisine_counts, top_n=3,
+        )
+ 
+        # ---- Borough concentration ----
+        boro_counts = (
+            cluster_df["boro"].fillna("Unknown")
+            .astype(str).str.strip()
+            .replace({"0": "Unknown"})
+            .value_counts(normalize=True)
+        )
+        top_boro = boro_counts.index[0] if not boro_counts.empty else "Unknown"
         top_boro_share = float(boro_counts.iloc[0]) if not boro_counts.empty else 0.0
-
-        label_parts = []
-        if top_cuisine and top_cuisine_share >= 0.22:
-            label_parts.append(top_cuisine)
-        if top_boro and top_boro_share >= 0.45:
-            label_parts.append(top_boro)
-        for driver in drivers:
-            part = driver["short_label"]
-            if part not in label_parts:
-                label_parts.append(part)
-            if len(label_parts) >= 3:
-                break
-
+        geographic = _geographic_persona(top_boro_share, top_boro)
+ 
+        # ---- Persona qualifiers ----
+        price_label = _price_persona(avg_price)
+        rating_label = _rating_persona(avg_rating, review_med)
+ 
+        # ---- Assemble the label ----
+        # We want the label to answer: who is this cluster for?
+        # Format: "[Cuisine persona] · [Borough if concentrated] · [Price/Quality]"
+        label_parts: list[str] = []
+        if cuisine_persona:
+            label_parts.append(cuisine_persona)
+        if geographic:
+            label_parts.append(geographic)
+        # Pick the more distinctive of {price, quality} for the third slot.
+        # Distinctiveness = how far from the global mean.
+        distinctive: str | None = None
+        price_delta = abs((avg_price or global_price) - global_price)
+        rating_delta = abs((avg_rating or global_rating) - global_rating)
+        if price_label and price_delta >= 0.25:
+            distinctive = price_label
+        if rating_label and rating_delta >= 0.2:
+            # Rating is more evocative — override if it's distinctive too
+            distinctive = rating_label
+        if distinctive:
+            label_parts.append(distinctive)
+ 
         if not label_parts:
             label_parts = [f"Cluster {cluster_id}"]
-
-        chosen = " · ".join(label_parts[:3])
-        if chosen in used_labels or _label_looks_internal(chosen):
-            chosen = f"{chosen} · C{cluster_id}"
-        used_labels.add(chosen)
-
-        avg_rating = pd.to_numeric(cluster_df["avg_rating"], errors="coerce").mean()
-        avg_price = pd.to_numeric(cluster_df["price_tier"], errors="coerce").mean()
-        avg_health = pd.to_numeric(cluster_df.get("score", pd.Series([np.nan] * len(cluster_df))), errors="coerce").mean()
-
-        driver_text = ", ".join(driver["phrase"] for driver in drivers[:3]) or "has a balanced mix of cuisine, quality, and location signals"
-        story = (
-            f"Defined by {driver_text}. "
-            f"Avg rating {avg_rating:.2f}, avg price tier {avg_price:.2f}, "
-            f"avg inspection score {avg_health:.1f}."
-        )
-
-        profile_rows.append(
-            {
-                "cluster_id": cluster_id,
-                "cluster_label": chosen,
-                "cluster_key_drivers": " | ".join(driver["short_label"] for driver in drivers[:3]) or "Balanced Mix",
-                "cluster_story": story,
-            }
-        )
-
+ 
+        label = " · ".join(label_parts[:3])
+ 
+        # De-dupe clashing labels across clusters (happens when two clusters
+        # look similar on our low-dimensional persona summary).
+        if label in used_labels:
+            label = f"{label} · C{cluster_id}"
+        used_labels.add(label)
+ 
+        # ---- Build a cuisine mix blurb ----
+        if top_cuisines:
+            cuisine_blurb = ", ".join(
+                f"{name} {share * 100:.0f}%" for name, share in top_cuisines
+            )
+        else:
+            cuisine_blurb = "mixed"
+ 
+        # ---- Build a borough mix blurb ----
+        top_boros = boro_counts.head(2)
+        boro_blurb_parts = [
+            f"{name} {share * 100:.0f}%" for name, share in top_boros.items()
+            if name not in ("Unknown", "")
+        ]
+        boro_blurb = ", ".join(boro_blurb_parts) if boro_blurb_parts else "spread across NYC"
+ 
+        # ---- Narrative story ----
+        # Lead with the persona, then justify with numbers.
+        story_parts: list[str] = []
+ 
+        if cuisine_is_mixed and len(top_cuisines) >= 2:
+            story_parts.append(
+                f"A **mixed-cuisine** cluster: the three most common cuisines are "
+                f"{cuisine_blurb} — no single cuisine carries more than "
+                f"{top_cuisines[0][1] * 100:.0f}% of the cluster, so these restaurants "
+                f"are grouped by shared **price, rating, and location** signals rather "
+                f"than cuisine."
+            )
+        else:
+            if top_cuisines:
+                main_cuisine, main_share = top_cuisines[0]
+                story_parts.append(
+                    f"A **{main_cuisine}-led** cluster — {main_share * 100:.0f}% of "
+                    f"restaurants here serve {main_cuisine}."
+                )
+ 
+        # Geography
+        if geographic:
+            story_parts.append(
+                f"Geographically concentrated in **{geographic}** "
+                f"({top_boro_share * 100:.0f}% of the cluster)."
+            )
+        elif boro_blurb_parts:
+            story_parts.append(f"Borough mix: {boro_blurb}.")
+ 
+        # Price + rating signal with direction
+        price_dir = ""
+        if not pd.isna(avg_price):
+            if avg_price > global_price + 0.2:
+                price_dir = "above-average prices"
+            elif avg_price < global_price - 0.2:
+                price_dir = "below-average prices"
+        rating_dir = ""
+        if not pd.isna(avg_rating):
+            if avg_rating > global_rating + 0.15:
+                rating_dir = "higher-than-average ratings"
+            elif avg_rating < global_rating - 0.15:
+                rating_dir = "lower-than-average ratings"
+ 
+        signal_bits = [bit for bit in (price_dir, rating_dir) if bit]
+        if signal_bits:
+            story_parts.append(
+                f"These restaurants show {' and '.join(signal_bits)} "
+                f"(avg rating {avg_rating:.2f}, avg price tier {avg_price:.2f} vs "
+                f"city averages {global_rating:.2f} / {global_price:.2f})."
+            )
+        else:
+            story_parts.append(
+                f"Operating near NYC averages on price and rating "
+                f"(avg rating {avg_rating:.2f}, avg price tier {avg_price:.2f})."
+            )
+ 
+        # Health context (only if meaningfully different or of interest)
+        if not pd.isna(avg_health) and not pd.isna(global_health):
+            if avg_health > global_health + 3:
+                story_parts.append(
+                    f"Slightly **higher DOHMH inspection scores** (avg "
+                    f"{avg_health:.1f}, worse than the citywide "
+                    f"{global_health:.1f}) — worth checking individual grades."
+                )
+            elif avg_health < global_health - 3:
+                story_parts.append(
+                    f"**Cleaner on health inspections** (avg score "
+                    f"{avg_health:.1f} vs city {global_health:.1f}, lower = better)."
+                )
+ 
+        story = " ".join(story_parts)
+ 
+        # ---- Key drivers — short enough for a chip, derived from persona pieces ----
+        drivers = [p for p in label_parts if not re.match(r"^Cluster\s*\d+$", p)]
+        if not drivers:
+            drivers = ["Balanced mix"]
+        key_drivers = " | ".join(drivers[:3])
+ 
+        profile_rows.append({
+            "cluster_id": cluster_id,
+            "cluster_label": label,
+            "cluster_key_drivers": key_drivers,
+            "cluster_story": story,
+            # Extras for UI use:
+            "cluster_persona": cuisine_persona,
+            "cluster_cuisine_mix": cuisine_blurb,
+            "cluster_boro_mix": boro_blurb,
+        })
+ 
     return pd.DataFrame(profile_rows)
-
+ 
 
 def _attach_cluster_profiles(df: pd.DataFrame) -> pd.DataFrame:
     profiles = _build_cluster_profiles(df)
@@ -483,12 +730,15 @@ def prepare_clustering_space(X_aug: np.ndarray, scaler: StandardScaler | None = 
 
 def _cluster_signature(df: pd.DataFrame, user_history: dict, k: int,
                        algorithm: str = "kmeans"):
+    sample = []
+    if "restaurant_id" in df.columns and len(df):
+        sample = sorted(df["restaurant_id"].astype(str).head(25).tolist())
     history_payload = {
         "schema_version": CLUSTER_SCHEMA_VERSION,
         "algorithm": algorithm,
         "k": int(k),
         "row_count": int(len(df)),
-        "restaurant_sample": sorted(df["restaurant_id"].astype(str).head(25).tolist()),
+        "restaurant_sample": sample,
     }
     payload = json.dumps(history_payload, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -1020,17 +1270,21 @@ BOROUGH_LIST = ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]
 def build_user_feature_vector(profile: dict, restaurant_df: pd.DataFrame) -> np.ndarray:
     """Construct a user feature vector in the same space as restaurant features.
 
-    Uses the user's profile preferences (cuisine, borough, budget) blended
-    with statistics from their liked restaurants to place them in the
-    interpretable feature space used by clustering.
-
-    Returns a 1-D numpy array with 22 elements matching the feature columns
-    produced by ``build_feature_matrix()``.
+    Differences from the previous version:
+    - Cuisine preferences are expressed as *presence indicators* (max-scaled to
+      1.0), not a normalized probability.  If the user likes Chinese and only
+      Chinese, the Chinese dimension is 1.0 — matching a Chinese restaurant row
+      exactly instead of being divided by the number of likes.
+    - Explicit favorite_cuisines override liked-cuisine averages so the user's
+      stated preferences are never diluted.
     """
-    liked_restaurants = profile.get("likes", [])
-    liked_ids = {str(l.get("restaurant_id", "")) for l in liked_restaurants if l.get("restaurant_id")}
+    from utils.clustering import TOP_CUISINES, BOROUGH_LIST, BUDGET_TO_PRICE  # type: ignore
 
-    # --- From profile preferences ---
+    liked_restaurants = profile.get("likes", [])
+    liked_ids = {str(l.get("restaurant_id", "")) for l in liked_restaurants
+                 if l.get("restaurant_id")}
+
+    # --- Price from budget preference ---
     budget_str = profile.get("budget", "$$")
     price_pref = BUDGET_TO_PRICE.get(budget_str, 2)
     price_norm = (price_pref - 1) / 3.0
@@ -1038,16 +1292,19 @@ def build_user_feature_vector(profile: dict, restaurant_df: pd.DataFrame) -> np.
     fav_cuisines = profile.get("favorite_cuisines", [])
     pref_boroughs = profile.get("preferred_boroughs", [])
 
-    # --- From liked restaurant history (if available) ---
+    # --- Stats from liked restaurants (if any) ---
     liked_mask = restaurant_df["restaurant_id"].astype(str).isin(liked_ids)
     liked_df = restaurant_df[liked_mask]
 
     if len(liked_df) > 0:
         avg_rating_norm = ((liked_df["avg_rating"].mean() - 1.0) / 4.0)
         log_reviews = np.log1p(liked_df["review_count"].values)
-        log_min, log_max = np.log1p(restaurant_df["review_count"].fillna(0).values).min(), np.log1p(restaurant_df["review_count"].fillna(0).values).max()
-        avg_review_norm = ((log_reviews.mean() - log_min) / (log_max - log_min)) if log_max > log_min else 0.5
-        health_series = pd.to_numeric(liked_df["score"], errors="coerce").fillna(21).clip(0, 42)
+        log_all = np.log1p(restaurant_df["review_count"].fillna(0).values)
+        log_min, log_max = log_all.min(), log_all.max()
+        avg_review_norm = ((log_reviews.mean() - log_min) /
+                           (log_max - log_min)) if log_max > log_min else 0.5
+        health_series = pd.to_numeric(liked_df["score"],
+                                      errors="coerce").fillna(21).clip(0, 42)
         avg_health_norm = 1 - (health_series.mean() / 42.0)
         avg_lat = liked_df["lat"].mean()
         avg_lng = liked_df["lng"].mean()
@@ -1058,46 +1315,61 @@ def build_user_feature_vector(profile: dict, restaurant_df: pd.DataFrame) -> np.
         avg_lat = restaurant_df["lat"].median()
         avg_lng = restaurant_df["lng"].median()
 
-    # Normalize lat/lng using the same range as build_feature_matrix
-    lat_all = pd.to_numeric(restaurant_df["lat"], errors="coerce").fillna(restaurant_df["lat"].median())
-    lng_all = pd.to_numeric(restaurant_df["lng"], errors="coerce").fillna(restaurant_df["lng"].median())
+    # Lat/lng normalization in the same range as build_feature_matrix
+    lat_all = pd.to_numeric(restaurant_df["lat"], errors="coerce").fillna(
+        restaurant_df["lat"].median())
+    lng_all = pd.to_numeric(restaurant_df["lng"], errors="coerce").fillna(
+        restaurant_df["lng"].median())
     lat_min, lat_max = lat_all.min(), lat_all.max()
     lng_min, lng_max = lng_all.min(), lng_all.max()
-    lat_norm = (avg_lat - lat_min) / (lat_max - lat_min) if lat_max > lat_min else 0.5
-    lng_norm = (avg_lng - lng_min) / (lng_max - lng_min) if lng_max > lng_min else 0.5
+    lat_norm = ((avg_lat - lat_min) / (lat_max - lat_min)
+                if lat_max > lat_min else 0.5)
+    lng_norm = ((avg_lng - lng_min) / (lng_max - lng_min)
+                if lng_max > lng_min else 0.5)
 
-    # --- Cuisine one-hot (from preferences + liked history) ---
-    cuisine_vec = np.zeros(len(TOP_CUISINES) + 1, dtype=np.float32)  # +1 for Other
-    # From explicit preferences
+    # --- Cuisine one-hot ---
+    # We encode *which* cuisines the user prefers as ones (0/1), not a
+    # normalized probability.  This matches the one-hot shape of a
+    # restaurant row, which is the key to making cosine similarity do the
+    # right thing.  If the user likes multiple cuisines, multiple dimensions
+    # are 1 — their taste is genuinely multi-modal and the recommender
+    # surfaces both.
+    cuisine_vec = np.zeros(len(TOP_CUISINES) + 1, dtype=np.float32)
+
+    # Explicit preferences take priority (they're what the user stated).
     for c in fav_cuisines:
         if c in TOP_CUISINES:
-            cuisine_vec[TOP_CUISINES.index(c)] += 1.0
+            cuisine_vec[TOP_CUISINES.index(c)] = 1.0
         else:
-            cuisine_vec[-1] += 0.5  # Other
-    # From liked restaurant cuisines
-    if len(liked_df) > 0:
-        for cuisine in liked_df["cuisine_type"].fillna("Other"):
-            if cuisine in TOP_CUISINES:
-                cuisine_vec[TOP_CUISINES.index(cuisine)] += 0.5
-            else:
-                cuisine_vec[-1] += 0.25
-    # Normalize to sum to 1 if non-zero
-    if cuisine_vec.sum() > 0:
-        cuisine_vec = cuisine_vec / cuisine_vec.sum()
+            cuisine_vec[-1] = 1.0  # Other
 
-    # --- Borough one-hot (from preferences + liked history) ---
+    # Likes add to the signal but only flip dimensions to 1 (never normalize).
+    if len(liked_df) > 0:
+        liked_cuisine_counts = liked_df["cuisine_type"].fillna("Other").value_counts()
+        # Require at least 2 likes (or ≥ 25% of all likes) before a cuisine
+        # from liked history gets an auto-preference.  This prevents a single
+        # outlier like from poisoning the user's taste vector.
+        min_count = max(2, int(len(liked_df) * 0.25))
+        for cuisine, count in liked_cuisine_counts.items():
+            if count >= min_count:
+                if cuisine in TOP_CUISINES:
+                    cuisine_vec[TOP_CUISINES.index(cuisine)] = 1.0
+                else:
+                    cuisine_vec[-1] = 1.0  # Other
+
+    # --- Borough one-hot (same 0/1 treatment) ---
     boro_vec = np.zeros(len(BOROUGH_LIST), dtype=np.float32)
     for b in pref_boroughs:
         if b in BOROUGH_LIST:
-            boro_vec[BOROUGH_LIST.index(b)] += 1.0
+            boro_vec[BOROUGH_LIST.index(b)] = 1.0
     if len(liked_df) > 0:
-        for boro in liked_df["boro"].fillna(""):
-            if boro in BOROUGH_LIST:
-                boro_vec[BOROUGH_LIST.index(boro)] += 0.5
-    if boro_vec.sum() > 0:
-        boro_vec = boro_vec / boro_vec.sum()
+        liked_boro_counts = liked_df["boro"].fillna("").value_counts()
+        min_count = max(2, int(len(liked_df) * 0.3))
+        for boro, count in liked_boro_counts.items():
+            if count >= min_count and boro in BOROUGH_LIST:
+                boro_vec[BOROUGH_LIST.index(boro)] = 1.0
 
-    # --- Assemble (must match build_feature_matrix order & weights) ---
+    # --- Assemble (must match build_feature_matrix's order AND weights) ---
     user_vec = np.concatenate([
         [price_norm * 1.5],
         [avg_rating_norm * 1.3],
@@ -1112,35 +1384,38 @@ def build_user_feature_vector(profile: dict, restaurant_df: pd.DataFrame) -> np.
     return user_vec
 
 
+
 def recommend_knn(user_vector: np.ndarray,
                   restaurant_matrix: np.ndarray,
                   restaurant_df: pd.DataFrame,
                   visited_ids: set,
                   k: int = 15,
-                  scaler: StandardScaler = None) -> pd.DataFrame:
+                  scaler: StandardScaler | None = None,
+                  profile: dict | None = None) -> pd.DataFrame:
     """Find the K nearest restaurants to the user vector using cosine similarity.
 
-    Parameters
-    ----------
-    user_vector : 1-D array matching the feature columns of build_feature_matrix (22 dims)
-    restaurant_matrix : 2-D array (N, 22) — raw output of build_feature_matrix
-    restaurant_df : DataFrame with restaurant metadata
-    visited_ids : set of restaurant_id strings to exclude
-    k : number of recommendations to return
-    scaler : optional StandardScaler for normalization before similarity.
-             Handles both the newer 22-dim cluster scaler and the legacy
-             23-dim [features + user_affinity] scaler.
-
-    Returns
-    -------
-    DataFrame of top-K recommended restaurants with a ``knn_similarity`` column.
+    With an optional `profile`, a cuisine-alignment boost is applied so users
+    with stated or implicit cuisine preferences see matching restaurants
+    ranked higher.
     """
     X_scaled = _scaled_space(restaurant_matrix, scaler)
     u_scaled = _scaled_space(user_vector, scaler)
-
     similarities = cosine_similarity(u_scaled, X_scaled).flatten()
 
-    # Mask visited restaurants
+    if profile is not None:
+        liked_ids_for_cuisine = {
+            str(l.get("restaurant_id", ""))
+            for l in profile.get("likes", [])
+            if l.get("restaurant_id")
+        }
+        liked_for_cuisine = restaurant_df[
+            restaurant_df["restaurant_id"].astype(str).isin(liked_ids_for_cuisine)
+        ]
+        boost = cuisine_alignment_score(
+            profile, restaurant_df["cuisine_type"], liked_for_cuisine,
+        )
+        similarities = similarities * boost
+
     visited_mask = restaurant_df["restaurant_id"].astype(str).isin(visited_ids)
     similarities[visited_mask.values] = -np.inf
 
@@ -1174,6 +1449,47 @@ def _scaled_space(vectors: np.ndarray, scaler: StandardScaler | None):
     )
 
 
+# --------------------------------------------------------------------------
+# New helper: cuisine alignment score (0 → 1+)
+# --------------------------------------------------------------------------
+
+def cuisine_alignment_score(profile: dict, cuisine_series: pd.Series,
+                            liked_df: pd.DataFrame | None = None) -> np.ndarray:
+    """
+    Return a per-restaurant score in [0, 1] describing how well its cuisine
+    matches the user's taste.
+
+    Rules (in order of priority):
+      - If the user has any explicit favorite_cuisines → match is 1.0, miss is 0.15
+        (we keep a small floor so we can still see other cuisines if not enough
+         matches exist).
+      - Else if the user's liked restaurants have a dominant cuisine family
+        (≥ 50% of likes in one cuisine) → match is 1.0, miss is 0.3.
+      - Else (no strong cuisine signal) → everything gets 1.0 (no boost).
+    """
+    cuisines = cuisine_series.fillna("Other").astype(str).str.strip()
+    n = len(cuisines)
+
+    fav_cuisines = [c for c in profile.get("favorite_cuisines", []) if c]
+    if fav_cuisines:
+        # Exact match against the user's stated cuisines
+        match = cuisines.isin(fav_cuisines).values.astype(np.float32)
+        return np.where(match, 1.0, 0.15).astype(np.float32)
+
+    if liked_df is not None and len(liked_df) >= 2:
+        liked_cuisines = liked_df["cuisine_type"].fillna("Other").value_counts(normalize=True)
+        if not liked_cuisines.empty and float(liked_cuisines.iloc[0]) >= 0.5:
+            dominant = liked_cuisines.index[0]
+            match = (cuisines == dominant).values.astype(np.float32)
+            return np.where(match, 1.0, 0.30).astype(np.float32)
+
+    return np.ones(n, dtype=np.float32)
+
+
+# --------------------------------------------------------------------------
+# Replacement for recommend_per_liked_knn
+# --------------------------------------------------------------------------
+
 def recommend_per_liked_knn(
     liked_vectors: np.ndarray,
     profile_vector: np.ndarray,
@@ -1185,46 +1501,21 @@ def recommend_per_liked_knn(
     k_final: int = 50,
     scaler: StandardScaler | None = None,
     rrf_constant: int = 60,
+    profile: dict | None = None,
 ) -> pd.DataFrame:
-    """Recommend via per-liked-restaurant KNN fused by reciprocal rank.
+    """K-NN recommendation with per-liked fusion + cuisine alignment boost.
 
-    For each liked restaurant, rank all restaurants by cosine similarity.
-    Combine the per-liked rankings via Reciprocal Rank Fusion:
-
-        score[r] = sum over l of 1 / (rank_l(r) + rrf_constant)
-
-    plus a small profile-similarity term so the results remain anchored
-    to the user's explicit preferences even if they liked nothing.
-
-    Parameters
-    ----------
-    liked_vectors : (L, 22) array — one row per liked restaurant's feature
-        vector from ``build_feature_matrix`` (same order as ``liked_metadata``
-        if provided).  May be empty.
-    profile_vector : (22,) array — the profile-only user vector from
-        ``build_user_feature_vector``.  Used as a fallback and as a small
-        bias term during fusion.
-    restaurant_matrix : (N, 22) array of candidate restaurant features.
-    restaurant_df : DataFrame with restaurant metadata (``restaurant_id``
-        required).  Rows align with ``restaurant_matrix``.
-    visited_ids : set of restaurant_id strings to exclude from output.
-    liked_metadata : optional list of L dicts with at least
-        ``restaurant_id`` and ``name`` — used to attribute the
-        ``primary_influencer`` column.  If ``None``, influencer labels
-        fall back to ``"liked #i"``.
-    k_per_liked : how many top neighbours to keep per liked restaurant.
-    k_final : total number of candidates to return for downstream re-ranking.
-    scaler : StandardScaler fit by clustering (see ``_scaled_space``).
-    rrf_constant : RRF damping constant (60 is the standard value from
-        Cormack et al. 2009).
-
-    Returns
-    -------
-    DataFrame of top ``k_final`` candidates with columns
-    ``knn_similarity`` (cosine-sim to profile), ``rrf_score`` (fusion
-    score), and ``primary_influencer`` (the liked restaurant that gave
-    the candidate its best rank).
+    New behaviour:
+      - A multiplicative cuisine-alignment term is applied to the fused RRF
+        score, so restaurants whose cuisine matches the user's stated or
+        implicit preferences are ranked higher than equally-similar misses.
+      - When the user has explicit favorite_cuisines, non-matching cuisines
+        are heavily deprioritised (score × 0.15) so Chinese-preferring users
+        see Chinese restaurants first, not Thai restaurants that happen to
+        share a similar price tier.
     """
+    from utils.clustering import _scaled_space  # type: ignore
+
     visited_set = {str(v) for v in visited_ids}
     restaurant_ids = restaurant_df["restaurant_id"].astype(str).values
     visited_mask = np.array([rid in visited_set for rid in restaurant_ids])
@@ -1233,24 +1524,36 @@ def recommend_per_liked_knn(
     profile_scaled = _scaled_space(profile_vector, scaler)
     profile_sim = cosine_similarity(profile_scaled, X_scaled).flatten()
 
-    # Profile-only fallback when no likes are available.
+    # --- Cuisine alignment based on profile ---
+    if profile is not None:
+        liked_ids_for_cuisine = {str(l.get("restaurant_id", ""))
+                                 for l in profile.get("likes", [])
+                                 if l.get("restaurant_id")}
+        liked_for_cuisine = restaurant_df[
+            restaurant_df["restaurant_id"].astype(str).isin(liked_ids_for_cuisine)
+        ]
+        cuisine_boost = cuisine_alignment_score(
+            profile, restaurant_df["cuisine_type"], liked_for_cuisine,
+        )
+    else:
+        cuisine_boost = np.ones(len(restaurant_df), dtype=np.float32)
+
+    # --- Fallback: no likes, rank by profile similarity alone (+ cuisine boost) ---
     if liked_vectors is None or len(liked_vectors) == 0:
-        sims = profile_sim.copy()
+        sims = profile_sim.copy() * cuisine_boost
         sims[visited_mask] = -np.inf
         top = np.argsort(sims)[::-1][:k_final]
         result = restaurant_df.iloc[top].copy()
-        result["knn_similarity"] = sims[top]
+        result["knn_similarity"] = profile_sim[top]
         result["rrf_score"] = sims[top]
+        result["cuisine_boost"] = cuisine_boost[top]
         result["primary_influencer"] = "Profile preferences"
         return result.reset_index(drop=True)
 
     liked_scaled = _scaled_space(np.asarray(liked_vectors, dtype=np.float32), scaler)
     per_liked_sims = cosine_similarity(liked_scaled, X_scaled)  # (L, N)
 
-    # Rank each row; rank_l[r] is r's 0-based rank among unvisited restaurants
-    # in liked-query l (lower rank = more similar).
     rrf_scores = np.zeros(len(restaurant_df), dtype=np.float64)
-    # Track which liked restaurant gave each candidate its best (smallest) rank.
     best_rank = np.full(len(restaurant_df), np.iinfo(np.int64).max, dtype=np.int64)
     best_source = np.full(len(restaurant_df), -1, dtype=np.int64)
 
@@ -1266,9 +1569,9 @@ def recommend_per_liked_knn(
                 best_rank[candidate_idx] = rank
                 best_source[candidate_idx] = l
 
-    # Small profile bias keeps explicit preferences relevant when likes are
-    # sparse or divergent from stated preferences.
     rrf_scores += 0.1 * profile_sim
+    # Apply multiplicative cuisine boost — this is the key fix.
+    rrf_scores = rrf_scores * cuisine_boost
     rrf_scores[visited_mask] = -np.inf
 
     top_indices = np.argsort(rrf_scores)[::-1][:k_final]
@@ -1277,6 +1580,19 @@ def recommend_per_liked_knn(
     result = restaurant_df.iloc[top_indices].copy()
     result["knn_similarity"] = profile_sim[top_indices]
     result["rrf_score"] = rrf_scores[top_indices]
+    result["cuisine_boost"] = cuisine_boost[top_indices]
+
+    def _influencer_label(idx):
+        src = int(best_source[idx])
+        if src < 0:
+            return "Profile preferences"
+        if liked_metadata and src < len(liked_metadata):
+            meta = liked_metadata[src]
+            return str(meta.get("name") or meta.get("dba") or f"liked #{src + 1}")
+        return f"liked #{src + 1}"
+
+    result["primary_influencer"] = [_influencer_label(i) for i in top_indices]
+    return result.reset_index(drop=True)
 
     def _influencer_label(idx):
         src = int(best_source[idx])
