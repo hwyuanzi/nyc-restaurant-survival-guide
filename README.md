@@ -40,7 +40,7 @@ Built with **PyTorch**, **Streamlit**, **Plotly**, **pydeck**, and **HuggingFace
 | Page | Purpose |
 |---|---|
 | 🔍 **Semantic Search** | Type what you want ("cozy Italian pasta spot in Brooklyn") and get ranked restaurant matches from a prepared dataset of ~2,835 real NYC restaurants enriched with Google Places data. |
-| 🧪 **Health Grade Classifier** | Pick a real NYC restaurant, get the predicted DOHMH health grade (A / B / C) with class probabilities. Held-out test-set performance is shown alongside so the audience can verify the classifier is a real trained MLP, not a rule. |
+| 🧪 **Health Grade Risk Classifier** | Pick a held-out NYC restaurant and estimate whether its inspection profile looks more like Grade A, B, or C restaurants. The page shows probabilities as risk signals, compares the MLP to an always-A baseline, and explains why score-derived leakage features were removed. |
 | 📍 **Restaurant Cluster GIS Map** | Cluster the ~2,835 restaurants with three comparable algorithms (K-Means from scratch, Gaussian Mixture, Ward) in a 22-dim interpretable feature space (price / rating / review volume / health / cuisine / borough / geo-location). Restaurants are colored by cluster on a real NYC map with persona labels + narrative stories. |
 | 📊 **PCA Embedding Explorer** | Projects the same clusters into 3-D PCA space with feature-loading bar charts, cluster-distance heatmap, and prototype restaurants nearest each centroid. |
 | 🔮 **Personalized Recommendations** | Given your saved profile and liked restaurants, ranks candidates by per-liked cosine KNN fused via Reciprocal Rank Fusion, re-ranked with Maximal Marginal Relevance for cuisine diversity, and a cuisine-alignment multiplier so users see their preferred cuisines first. |
@@ -126,7 +126,7 @@ Input (25-D)
 
 **From-scratch requirement:** `models/custom_mlp.py` implements the model class, training loop (mini-batch gradient descent, forward/backward, loss computation), evaluation (confusion matrix, per-class F1/precision/recall), gradient-based feature importance, permutation importance, and a counterfactual adversarial search engine — no scikit-learn wrappers used.
 
-**Classifier explainability UI:** Given a selected held-out restaurant, the Streamlit page exposes actionable sliders for total violations and violations per inspection, context selectors for borough/cuisine, before-vs-after class probabilities, local feature sensitivity, a constrained "Path to A" search, and a PCA context map using the project's NumPy PCA implementation. Improvement advice is limited to actionable violation-pattern features; PCA is used only to explain feature-space geometry.
+**Classifier explainability UI:** Given a selected held-out restaurant, the Streamlit page exposes integer sliders for total violations and inspection count, derives violations-per-inspection from those counts, provides context selectors for borough/cuisine, compares before-vs-after class probabilities, ranks local feature sensitivity, runs a constrained "Path to A" search, and shows a PCA context map using the project's NumPy PCA implementation. Improvement advice is limited to actionable violation-pattern features; PCA is used only to explain feature-space geometry.
 
 ---
 
@@ -382,7 +382,7 @@ Expected: **10 tests, all passing** — covering the MLP (2 tests), Autoencoder 
 
 2. **Semantic Search (Page 1)** — Type a natural-language craving or occasion (cuisine, vibe, neighborhood, dietary preference). Results are ranked by cosine similarity of Transformer embeddings. Filter by borough, health grade, and minimum Google rating in the sidebar. Click the heart icon to save restaurants to your profile.
 
-3. **Health Grade Classifier (Page 2)** — Search the held-out test set and click a restaurant row to see its predicted grade, 3-class probability bar, and the true DOHMH grade for comparison. The Model Performance panel shows the full confusion matrix and per-class F1, precision, and recall.
+3. **Health Grade Risk Classifier (Page 2)** — Search the held-out test set and click a restaurant row to see its estimated A/B/C risk category, 3-class probability bar, and the true DOHMH grade for comparison. The Model Performance panel shows a majority-class baseline, full confusion matrix, and per-class F1, precision, and recall.
 
 4. **Restaurant Cluster GIS Map (Page 3)** — Choose a clustering algorithm (K-Means / GMM / Ward) and number of clusters in the sidebar. Restaurants appear as 3D columns on a real NYC map, colored by cluster persona. Scroll down for per-cluster summary cards showing cuisine mix, borough distribution, average rating and price, and a narrative explaining why the cluster exists.
 

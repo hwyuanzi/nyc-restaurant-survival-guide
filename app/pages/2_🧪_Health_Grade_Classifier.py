@@ -1,9 +1,8 @@
 """
-Page 2 — Simple Health Grade Classifier
+Page 2 — Health Grade Risk Classifier
  
 Pick a restaurant from the DOHMH held-out test set, hit the button, get the
-predicted grade (A / B / C) with class probabilities.  That is the whole
-story of this page.
+estimated grade-risk category (A / B / C) with class probabilities.
  
 What makes this version different from our earlier sandbox:
   1. We removed all score-derived features from the training set, because
@@ -19,6 +18,10 @@ What makes this version different from our earlier sandbox:
      than PCA for "what matters to predictions" because PCA measures
      variance, not predictive power.
  
+This is a held-out restaurant-profile classifier, not a strict future-grade
+forecasting model.  A future forecasting setup would use only inspections
+before time t to predict the next inspection grade at time t.
+
 Data:   data/train.csv + data/test.csv
 Model:  models/custom_mlp.py — cached at data/cache/health_classifier.pt
 """
@@ -35,6 +38,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import torch
+from sklearn.metrics import accuracy_score, f1_score, recall_score
 from sklearn.model_selection import train_test_split
  
 from app.ui_utils import apply_apple_theme
@@ -47,19 +51,19 @@ from utils.user_profile import init_session_state
 # Page chrome
 # ---------------------------------------------------------------------------
  
-st.set_page_config(page_title="Health Grade Classifier", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="Health Grade Risk Classifier", page_icon="🧪", layout="wide")
 apply_apple_theme()
 init_session_state()
  
 from utils.auth import require_auth
 require_auth()
  
-st.title("🧪 Health Grade Classifier")
+st.title("🧪 Health Grade Risk Classifier")
 st.markdown(
-    "Pick a NYC restaurant, run it through our trained MLP, and see the predicted "
-    "DOHMH letter grade (A / B / C).  The model is trained on real NYC Department "
-    "of Health inspection history; the test set below was held out entirely during "
-    "training."
+    "Pick a NYC restaurant from the held-out DOHMH test set and estimate whether "
+    "its inspection profile looks more like Grade A, B, or C restaurants.  This "
+    "is a risk classifier built from real inspection-history features, not a "
+    "lookup table and not an official future-grade forecast."
 )
  
  
@@ -208,7 +212,7 @@ SCALER_SCALE = dict(zip(feature_config.get("numerical_features", []),
                         feature_config.get("scaler_scale", [])))
 BORO_COLS = [c for c in feature_cols if c.startswith("boro_")]
 CUISINE_COLS = [c for c in feature_cols if c.startswith("cuisine_")]
-ACTIONABLE_FEATURES = ["num_violations", "violations_per_inspection"]
+ACTIONABLE_FEATURES = ["num_violations"]
 COUNT_FEATURES = {"num_inspections", "num_violations"}
 FEATURE_LABELS = {
     "num_inspections": "Number of inspections",
@@ -233,6 +237,18 @@ def _with_numeric_raw(feature_row: np.ndarray, feature_name: str, raw_value: flo
     return edited
 
 
+def _with_violation_counts(feature_row: np.ndarray, total_violations: int,
+                           num_inspections: int) -> np.ndarray:
+    """Edit discrete counts and update the derived violation-rate feature."""
+    inspections = max(int(num_inspections), 1)
+    total = max(int(total_violations), 0)
+    edited = _with_numeric_raw(feature_row, "num_violations", float(total))
+    edited = _with_numeric_raw(edited, "num_inspections", float(inspections))
+    if "violations_per_inspection" in FEATURE_INDEX:
+        edited = _with_numeric_raw(edited, "violations_per_inspection", total / inspections)
+    return edited
+
+
 def _active_one_hot(feature_row: np.ndarray, columns: list[str]) -> str | None:
     if not columns:
         return None
@@ -254,13 +270,13 @@ def _display_category(col_name: str, prefix: str) -> str:
 
 @st.cache_data(show_spinner=False)
 def get_numeric_raw_ranges():
-    """Realistic slider bounds from the 1st-99th percentiles of prepared data."""
+    """Observed raw-value ranges from the prepared train/test feature matrix."""
     combined = pd.concat([train_df[feature_cols], test_df[feature_cols]], axis=0)
     ranges = {}
     for col in NUMERIC_FEATURES:
         raw_values = combined[col].astype(float).map(lambda v: _raw_value(col, v)).to_numpy()
-        lo = float(np.nanpercentile(raw_values, 1))
-        hi = float(np.nanpercentile(raw_values, 99))
+        lo = float(np.nanmin(raw_values))
+        hi = float(np.nanmax(raw_values))
         if col in COUNT_FEATURES:
             lo = float(np.floor(lo))
             hi = float(np.ceil(hi))
@@ -272,17 +288,6 @@ def get_numeric_raw_ranges():
             )),
         }
     return ranges
-
-
-def _slider_step(feature_name: str, min_value: float, max_value: float) -> float:
-    if feature_name in COUNT_FEATURES:
-        return 1
-    span = max(max_value - min_value, 1.0)
-    if span <= 10:
-        return 0.1
-    if span <= 50:
-        return 0.5
-    return 1.0
 
 
 def _grade_from_probs(probs: np.ndarray) -> str:
@@ -336,45 +341,43 @@ def local_sensitivity(feature_row: np.ndarray) -> pd.DataFrame:
             "Current": current_raw,
             "Reference": target_raw,
             "Delta P(A)": float(edited_probs[0] - base_probs[0]),
-            "Actionable": "Yes" if col in ACTIONABLE_FEATURES else "Context",
+            "Actionable": "Yes" if col in ACTIONABLE_FEATURES else "Derived" if col == "violations_per_inspection" else "Context",
         })
     return pd.DataFrame(rows).sort_values("Delta P(A)", ascending=False)
 
 
 def find_path_to_a(feature_row: np.ndarray):
-    """Search for a realistic A-path by lowering violation rate while holding history fixed."""
+    """Search for a realistic A-path by lowering integer violations with inspection history fixed."""
     if not all(col in FEATURE_INDEX for col in ACTIONABLE_FEATURES + ["num_inspections"]):
         return None
 
     inspections = max(_raw_value("num_inspections", feature_row[FEATURE_INDEX["num_inspections"]]), 1.0)
-    current_vpi = max(_raw_value("violations_per_inspection",
-                                 feature_row[FEATURE_INDEX["violations_per_inspection"]]), 0.0)
-    current_total = max(_raw_value("num_violations",
-                                   feature_row[FEATURE_INDEX["num_violations"]]), 0.0)
+    inspections_int = max(int(round(inspections)), 1)
+    current_total = max(int(round(_raw_value("num_violations",
+                                             feature_row[FEATURE_INDEX["num_violations"]]))), 0)
+    min_total = int(get_numeric_raw_ranges()["num_violations"]["min"])
 
     best = None
-    for candidate_vpi in np.linspace(current_vpi, 0.0, 80):
-        candidate_total = float(np.floor(min(current_total, candidate_vpi * inspections)))
-        edited = _with_numeric_raw(feature_row, "violations_per_inspection", candidate_vpi)
-        edited = _with_numeric_raw(edited, "num_violations", candidate_total)
+    for candidate_total in range(current_total, min_total - 1, -1):
+        candidate_vpi = candidate_total / inspections_int
+        edited = _with_violation_counts(feature_row, candidate_total, inspections_int)
         probs = predict_grade(edited)
         if _grade_from_probs(probs) == "A":
             best = {
                 "feature_row": edited,
                 "probs": probs,
                 "violations_per_inspection": candidate_vpi,
-                "num_violations": candidate_total,
+                "num_violations": float(candidate_total),
             }
             break
 
     if best is not None:
         return best
 
-    # Fallback: show the best P(A) improvement even if the decision boundary is not crossed.
-    candidate_vpi = 0.0
-    candidate_total = 0.0
-    edited = _with_numeric_raw(feature_row, "violations_per_inspection", candidate_vpi)
-    edited = _with_numeric_raw(edited, "num_violations", candidate_total)
+    # Fallback: show the best in-range P(A) improvement even if the boundary is not crossed.
+    candidate_total = min_total
+    candidate_vpi = candidate_total / inspections_int
+    edited = _with_violation_counts(feature_row, candidate_total, inspections_int)
     return {
         "feature_row": edited,
         "probs": predict_grade(edited),
@@ -460,7 +463,8 @@ st.info(
     f"{len(test_df):,}.  Class-weighted CrossEntropy loss, AdamW optimizer, "
     f"early stopping on validation F1.  Best val F1: "
     f"{training_history.best_val_f1*100:.1f}% at epoch "
-    f"{training_history.best_epoch+1}.",
+    f"{training_history.best_epoch+1}.  The app reports probabilities as "
+    f"risk signals because the no-score feature set is intentionally leakage-reduced.",
     icon="🧠",
 )
  
@@ -500,13 +504,14 @@ with st.expander("🔍 Why we dropped inspection-score features from training", 
         - `violations_per_inspection` — violation rate
         - borough + top-{len([c for c in feature_cols if c.startswith('cuisine_')])} cuisine one-hots
  
-        **Result:** test accuracy dropped to {
+        **Result:** held-out accuracy dropped to {
             'a realistic range' if input_dim < 28 else 'a still-suspiciously-high level'
         }
-        — but now every percentage point of that accuracy comes from a
-        feature the model can see at *prediction* time on a brand-new
-        restaurant that hasn't been graded yet.  That's a genuine ML
-        task, not a lookup table.
+        — but the score is no longer inflated by a feature that directly
+        determines the label.  The model now estimates grade-risk patterns
+        from inspection counts, violation rate, borough, and cuisine.  It is
+        a genuine ML classifier on held-out restaurant profiles, not a
+        threshold lookup table.
         """
     )
  
@@ -573,6 +578,8 @@ probs = predict_grade(feature_row)
 pred_idx = int(np.argmax(probs))
 pred_grade = GRADE_NAMES[pred_idx]
 is_correct = pred_grade == true_grade
+top_probability = float(probs[pred_idx])
+probability_note = "Concentrated probability" if top_probability >= 0.65 else "Moderately spread probabilities" if top_probability >= 0.50 else "Broad probability spread"
  
 col_info, col_chart = st.columns([1, 1.1])
  
@@ -593,13 +600,16 @@ with col_info:
             text-align: center;
             margin-bottom: 16px;'>
             <div style='font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1px;'>
-                Predicted grade
+                Estimated risk category
             </div>
             <div style='font-size: 72px; font-weight: 700; color: {color}; line-height: 1;'>
                 {pred_grade}
             </div>
             <div style='font-size: 16px; color: #444; margin-top: 6px;'>
-                Confidence: <b>{probs[pred_idx] * 100:.1f}%</b>
+                Top class probability: <b>{top_probability * 100:.1f}%</b>
+            </div>
+            <div style='font-size: 13px; color: #777; margin-top: 4px;'>
+                {probability_note}
             </div>
         </div>
         """,
@@ -607,13 +617,20 @@ with col_info:
     )
  
     st.markdown(f"**Actual grade on record:** **{true_grade}**")
+    if top_probability < 0.50:
+        st.info(
+            "The class probabilities are close together for this restaurant, so the "
+            "profile sits near the model's decision boundary.  Read this as a risk "
+            "distribution rather than an official grade assignment.",
+            icon="ℹ️",
+        )
     if is_correct:
         st.success("✅ Correct — the classifier matched the DOHMH grade.")
     else:
         st.warning(
             f"⚠️ Classifier predicted **{pred_grade}**, actual grade is **{true_grade}**.  "
             "Since we dropped score features (see explainer above), the model now has "
-            "to predict from violation patterns alone — individual misses are expected."
+            "to estimate risk from coarse profile features — individual misses are expected."
         )
  
 with col_chart:
@@ -641,9 +658,9 @@ with col_chart:
 st.markdown("---")
 st.subheader("3️⃣ What-if Explorer")
 st.caption(
-    "Change the model inputs and watch the predicted grade update.  Numeric sliders "
-    "edit standardized MLP inputs after converting them back to readable inspection "
-    "units. Count features move in whole numbers; violation rate can be fractional. "
+    "Change integer inspection counts and watch the predicted grade update.  The "
+    "violation rate is recalculated as total violations divided by inspections, then "
+    "standardized before it enters the MLP. "
     "Borough and cuisine selectors are for correlation exploration only."
 )
 
@@ -654,36 +671,20 @@ col_sliders, col_profile = st.columns([1.15, 0.85])
 
 with col_sliders:
     st.markdown("**Actionable inspection pattern**")
-    for col in ACTIONABLE_FEATURES:
-        if col not in FEATURE_INDEX:
-            continue
-        current_raw = _raw_value(col, feature_row[FEATURE_INDEX[col]])
-        min_value = min(raw_ranges[col]["min"], current_raw)
-        max_value = max(raw_ranges[col]["max"], current_raw)
-        if col in COUNT_FEATURES:
-            slider_kwargs = {
-                "min_value": int(np.floor(min_value)),
-                "max_value": int(np.ceil(max_value)),
-                "value": int(round(current_raw)),
-                "step": 1,
-            }
-        else:
-            slider_kwargs = {
-                "min_value": float(min_value),
-                "max_value": float(max_value),
-                "value": float(current_raw),
-                "step": float(_slider_step(col, min_value, max_value)),
-            }
-        value = st.slider(
-            FEATURE_LABELS.get(col, col.replace("_", " ").title()),
-            **slider_kwargs,
-            help=(
-                "Range is clipped to the 1st-99th percentile of the prepared DOHMH "
-                "data so the demo avoids unrealistic outliers.  The model receives "
-                "a standardized version of this value."
-            ),
-        )
-        edited_row = _with_numeric_raw(edited_row, col, float(value))
+    current_total_raw = _raw_value("num_violations", feature_row[FEATURE_INDEX["num_violations"]])
+    total_min = min(raw_ranges["num_violations"]["min"], current_total_raw)
+    total_max = max(raw_ranges["num_violations"]["max"], current_total_raw)
+    edited_total = st.slider(
+        FEATURE_LABELS["num_violations"],
+        min_value=int(np.floor(total_min)),
+        max_value=int(np.ceil(total_max)),
+        value=int(round(current_total_raw)),
+        step=1,
+        help=(
+            "Integer count. Range uses the observed min/max in the prepared DOHMH "
+            "train/test feature matrix."
+        ),
+    )
 
     if "num_inspections" in FEATURE_INDEX:
         st.markdown("**Historical context**")
@@ -700,10 +701,32 @@ with col_sliders:
             help=(
                 "This is context, not a direct improvement lever.  A restaurant cannot "
                 "erase inspection history, but changing it shows how exposure affects the model. "
-                "Range is clipped to the 1st-99th percentile of the prepared data."
+                "Range uses the observed min/max in the prepared train/test feature matrix."
             ),
         )
-        edited_row = _with_numeric_raw(edited_row, col, float(value))
+        edited_inspections = int(value)
+    else:
+        edited_inspections = 1
+        min_value = max_value = 1
+
+    edited_vpi = edited_total / max(edited_inspections, 1)
+    edited_row = _with_violation_counts(edited_row, edited_total, edited_inspections)
+
+    st.metric(
+        "Derived violations per inspection",
+        f"{edited_vpi:.2f}",
+        help="Derived from the two integer sliders above: total violations / number of inspections.",
+    )
+    st.caption(
+        "Variable selection rule: only model input features are exposed. Counts are sliders; "
+        "the rate is derived; borough/cuisine remain selectors because they are one-hot categories."
+    )
+    st.caption(
+        f"Current slider ranges: total violations {int(np.floor(total_min))}-"
+        f"{int(np.ceil(total_max))}; inspections {int(np.floor(min_value))}-"
+        f"{int(np.ceil(max_value))}. These are observed bounds in the prepared "
+        "train/test data, widened when needed to include the selected restaurant."
+    )
 
 with col_profile:
     st.markdown("**Profile selectors**")
@@ -1012,17 +1035,60 @@ def get_test_metrics():
         model, tensors["X_test"], tensors["y_test"],
         class_names=GRADE_NAMES, return_details=True,
     )
+
+
+@st.cache_data(show_spinner=False)
+def get_baseline_metrics():
+    """Majority-class benchmark: always predict Grade A."""
+    y_true = tensors["y_test"].numpy()
+    baseline_preds = np.zeros_like(y_true)
+    bc_mask = y_true != 0
+    return {
+        "accuracy": accuracy_score(y_true, baseline_preds),
+        "weighted_f1": f1_score(y_true, baseline_preds, average="weighted", zero_division=0),
+        "macro_f1": f1_score(y_true, baseline_preds, average="macro", zero_division=0),
+        "bc_recall": recall_score(y_true[bc_mask], baseline_preds[bc_mask],
+                                  average="micro", zero_division=0) if bc_mask.any() else 0.0,
+    }
  
  
 details = get_test_metrics()
 report = details["classification_report"]
+baseline = get_baseline_metrics()
+bc_recall = (report["B"]["recall"] + report["C"]["recall"]) / 2
  
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Accuracy", f"{report['accuracy'] * 100:.1f}%")
-m2.metric("Weighted F1", f"{details['weighted_f1']:.3f}")
+m2.metric("B/C Recall", f"{bc_recall:.3f}",
+          help="Average recall for the two risky minority grades. The always-A baseline is 0.")
 m3.metric("Macro F1", f"{report['macro avg']['f1-score']:.3f}",
           help="Unweighted mean of per-class F1 — fairer on rare grades.")
 m4.metric("Test size", f"{len(test_df):,}")
+
+benchmark_df = pd.DataFrame([
+    {
+        "Model": "Custom MLP",
+        "Accuracy": f"{report['accuracy']:.3f}",
+        "Weighted F1": f"{details['weighted_f1']:.3f}",
+        "Macro F1": f"{report['macro avg']['f1-score']:.3f}",
+        "B/C Recall": f"{bc_recall:.3f}",
+    },
+    {
+        "Model": "Always predict A baseline",
+        "Accuracy": f"{baseline['accuracy']:.3f}",
+        "Weighted F1": f"{baseline['weighted_f1']:.3f}",
+        "Macro F1": f"{baseline['macro_f1']:.3f}",
+        "B/C Recall": f"{baseline['bc_recall']:.3f}",
+    },
+])
+st.markdown("**Benchmark against a majority-class baseline**")
+st.dataframe(benchmark_df, use_container_width=True, hide_index=True)
+st.caption(
+    "Because Grade A dominates the data, an always-A baseline can score high raw "
+    "accuracy while completely missing B/C restaurants.  We emphasize macro F1, "
+    "minority-class recall, and the confusion matrix to show what the MLP learns "
+    "beyond the trivial majority-class rule."
+)
  
 col_cm, col_per_class = st.columns([1, 1])
  
