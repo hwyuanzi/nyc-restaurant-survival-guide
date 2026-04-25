@@ -1,20 +1,12 @@
 {
   "numerical_features": [
-    "latest_score",
-    "avg_score",
-    "max_score",
     "num_inspections",
     "num_violations",
-    "critical_ratio",
     "violations_per_inspection"
   ],
   "feature_columns": [
-    "latest_score",
-    "avg_score",
-    "max_score",
     "num_inspections",
     "num_violations",
-    "critical_ratio",
     "violations_per_inspection",
     "boro_0",
     "boro_Bronx",
@@ -39,7 +31,7 @@
     "cuisine_Pizza",
     "cuisine_Spanish"
   ],
-  "input_dim": 29,
+  "input_dim": 25,
   "grade_map": {
     "A": 0,
     "B": 1,
@@ -63,21 +55,13 @@
     "Spanish"
   ],
   "scaler_mean": [
-    13.60896716250351,
-    13.865283652753831,
-    14.88527925905136,
     1.2947656469267472,
     1.5364861072130227,
-    0.4902140718762947,
     1.1835590326503882
   ],
   "scaler_scale": [
-    9.498459090346126,
-    9.311979957313955,
-    10.608835565529878,
     0.5294239794515305,
     0.8269436244911319,
-    0.44165150901296435,
     0.4158984495057435
   ]
 }

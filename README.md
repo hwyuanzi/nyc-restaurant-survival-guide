@@ -14,7 +14,7 @@ Built with **PyTorch**, **Streamlit**, **Plotly**, **pydeck**, and **HuggingFace
 | Name | GitHub |
 |---|---|
 | Hollan Yuan | [hwyuanzi](https://github.com/hwyuanzi) |
-| Ryan Han | [PapTR](https://github.com/PapTR)|
+| Ryan Han (PapTR) | [PapTR](https://github.com/PapTR) |
 | Rahul Adusumalli | — |
 | TBD | — |
 | TBD | — |
