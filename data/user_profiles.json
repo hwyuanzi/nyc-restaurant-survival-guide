@@ -48,21 +48,99 @@
     "favorite_vibes": [],
     "likes": [
       {
-        "restaurant_id": "50151969",
-        "camis": "50151969",
-        "g_place_id": "ChIJzRA7agBZwokRbSxOyEGFG5U",
-        "dba": "Din Tai Fung",
-        "cuisine": "Thai",
+        "restaurant_id": "50108065",
+        "camis": "50108065",
+        "g_place_id": "ChIJcdD7YIxZwokRP-0PIAQj3cU",
+        "dba": "Chick-Fil-A",
+        "cuisine": "Chicken",
+        "boro": "Manhattan",
+        "grade": "A",
+        "score": 7,
+        "rating": 5.0,
+        "source": "semantic_search",
+        "liked_at": "2026-04-25T12:09:13"
+      },
+      {
+        "restaurant_id": "40562839",
+        "camis": "40562839",
+        "g_place_id": "ChIJh5JzbfZYwokRR7KqJOksL7Y",
+        "dba": "Jean-Georges",
+        "cuisine": "New French",
+        "boro": "Manhattan",
+        "grade": "A",
+        "score": 11,
+        "rating": 5.0,
+        "source": "semantic_search",
+        "liked_at": "2026-04-25T12:19:56"
+      },
+      {
+        "restaurant_id": "41399893",
+        "camis": "41399893",
+        "g_place_id": "ChIJyw5j84lZwokRnUI_UknPSNA",
+        "dba": "La Colombe",
+        "cuisine": "Coffee/Tea",
+        "boro": "Manhattan",
+        "grade": "A",
+        "score": 7,
+        "rating": 5.0,
+        "source": "semantic_search",
+        "liked_at": "2026-04-25T12:19:52"
+      },
+      {
+        "restaurant_id": "40383464",
+        "camis": "40383464",
+        "g_place_id": "ChIJV7QQ6kdZwokRax4615zpSGU",
+        "dba": "Le Bernardin",
+        "cuisine": "French",
+        "boro": "Manhattan",
+        "grade": "A",
+        "score": 10,
+        "rating": 5.0,
+        "source": "semantic_search",
+        "liked_at": "2026-04-25T12:08:32"
+      },
+      {
+        "restaurant_id": "50109132",
+        "camis": "50109132",
+        "g_place_id": "ChIJjcAJd-tZwokRJ0GkkJ2Urp0",
+        "dba": "Le Pavillon",
+        "cuisine": "French",
+        "boro": "Manhattan",
+        "grade": "A",
+        "score": 11,
+        "rating": 5.0,
+        "source": "semantic_search",
+        "liked_at": "2026-04-25T12:08:30"
+      },
+      {
+        "restaurant_id": "50073194",
+        "camis": "50073194",
+        "g_place_id": "ChIJ9-HmjwNgwokRp6EUmlmFEao",
+        "dba": "Pho Metro",
+        "cuisine": "Southeast Asian",
+        "boro": "Queens",
+        "grade": "A",
+        "score": 7,
+        "rating": 5.0,
+        "source": "semantic_search",
+        "liked_at": "2026-04-25T12:19:35"
+      },
+      {
+        "restaurant_id": "50096535",
+        "camis": "50096535",
+        "g_place_id": "ChIJNzbNip5ZwokRNguiBkRaPYo",
+        "dba": "Pho Shop",
+        "cuisine": "Asian/Asian Fusion",
         "boro": "Manhattan",
         "grade": "A",
         "score": 13,
         "rating": 5.0,
         "source": "semantic_search",
-        "liked_at": "2026-04-14T21:24:12"
+        "liked_at": "2026-04-25T12:19:38"
       }
     ],
     "created_at": "2026-04-14T21:23:23",
-    "updated_at": "2026-04-22T22:44:26"
+    "updated_at": "2026-04-25T15:23:04"
   },
   "testuserauth": {
     "id": "testuserauth",

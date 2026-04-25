@@ -1,26 +1,9 @@
 """
-Bug fix for load_prepared_search_assets in utils/search_assets.py.
+Load cached restaurant search assets for the Streamlit app.
 
-The original function fetches the DOHMH "base" DataFrame from the NYC Open
-Data live API on every app start, and only then looks at the on-disk
-prepared cache.  If the API fails for any reason — network down, rate limit,
-Socrata outage — the function returns an empty DataFrame even though a
-perfectly good 2,835-restaurant `prepared_search_v4_3800.pkl` is sitting in
-`data/cache/`.
-
-This cascades into two visible errors:
-  1. Page 1 (Semantic Search) shows "No restaurants returned valid Google
-     Places data. Check your API key and quota."
-  2. Page 3 (Restaurant Cluster Map) crashes with
-     `KeyError: 'restaurant_id'` because the empty DataFrame from step 1
-     gets written into `session_state['raw_df']` and every downstream page
-     treats that as valid data.
-
-Fix: check the prepared cache BEFORE hitting the live API.  Only fall
-through to the live API if the cache is missing or stale.
-
-Replace the body of load_prepared_search_assets in utils/search_assets.py
-with the version below.  No other changes needed.
+The live Google Places and NYC Open Data rebuild path is optional.  For the
+submitted demo, the app first uses committed prepared caches so it can launch
+reliably without network access or API keys.
 """
 
 from pathlib import Path
@@ -184,11 +167,6 @@ def load_prepared_search_assets(sample_size=DEFAULT_SEARCH_SAMPLE_SIZE, force_re
         "source": "live",
     }
 
-
-# --------------------------------------------------------------------------
-# The other functions in search_assets.py stay exactly as-is.  Only replace
-# load_prepared_search_assets in the existing file.
-# --------------------------------------------------------------------------
 
 def warm_search_assets(sample_size=DEFAULT_SEARCH_SAMPLE_SIZE):
     return load_prepared_search_assets(sample_size=sample_size, force_refresh=False)

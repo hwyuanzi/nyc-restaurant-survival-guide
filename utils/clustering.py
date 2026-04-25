@@ -35,7 +35,7 @@ ALGO_CACHE_PATHS = {
     "agglomerative": ("data/cluster_cache_agglo.parquet", "data/cluster_model_agglo.joblib"),
 }
 CACHE_TTL  = 86400  # 24 hours
-CLUSTER_SCHEMA_VERSION = 25  # Cuisine grouping: 6 broad groups replace 10 individual one-hots
+CLUSTER_SCHEMA_VERSION = 27  # Keep requested K clusters; cleaner duplicate labels
 TSNE_MAX_ROWS = 3500
 
 try:
@@ -447,8 +447,12 @@ def _build_cluster_profiles(df: pd.DataFrame) -> pd.DataFrame:
         # look similar on our low-dimensional persona summary).
         if label in used_labels:
             if top_cuisines:
-                top2 = " & ".join(name for name, _ in top_cuisines[:2])
-                label = f"{label} [{top2}]"
+                distinct_cuisines = [
+                    name for name, _ in top_cuisines[:2]
+                    if name.lower() not in label.lower()
+                ]
+                if distinct_cuisines:
+                    label = f"{label} · {distinct_cuisines[0]} Mix"
             if label in used_labels:
                 label = f"{label} ({len(cluster_df)})"
         used_labels.add(label)
@@ -734,7 +738,6 @@ def apply_user_weights(X: np.ndarray, df: pd.DataFrame, user_history: dict):
 
 def compute_user_affinity(X: np.ndarray, df: pd.DataFrame, user_history: dict):
     visited_ids = user_history.get("visited_ids", [])
-    rated       = user_history.get("rated", {})
 
     if not visited_ids:
         return np.zeros(len(df), dtype=np.float32)
@@ -745,12 +748,9 @@ def compute_user_affinity(X: np.ndarray, df: pd.DataFrame, user_history: dict):
     if len(visited_X) == 0:
         return np.zeros(len(df), dtype=np.float32)
 
-    # Weighted mean of visited restaurants by rating
-    weights = []
-    for rid in df.loc[visited_mask, "restaurant_id"]:
-        weights.append(rated.get(rid, 3.0) / 5.0)
-    weights = np.array(weights).reshape(-1, 1)
-    user_vec = (visited_X * weights).sum(axis=0, keepdims=True) / (weights.sum() + 1e-8)
+    # Liked restaurants are equal positive examples; the app does not ask users
+    # to maintain numeric ratings.
+    user_vec = visited_X.mean(axis=0, keepdims=True)
 
     affinity = cosine_similarity(X, user_vec).flatten().astype(np.float32)
     return affinity
@@ -1000,27 +1000,6 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
         kmeans = best_model
     df["cluster_id"] = best_labels
 
-    # Merge undersized clusters (< 1.5% of total) into the nearest larger cluster
-    # by centroid distance. Prevents truly degenerate micro-groups while keeping
-    # meaningful small clusters (e.g., 40+ restaurants in a niche cuisine/area).
-    centroids = kmeans.cluster_centers_
-    min_cluster_size = max(1, int(round(len(df) * 0.015)))
-    while True:
-        cluster_sizes = df["cluster_id"].value_counts()
-        small_cluster_ids = cluster_sizes[cluster_sizes < min_cluster_size].index.tolist()
-        large_cluster_ids = cluster_sizes[cluster_sizes >= min_cluster_size].index.tolist()
-        if not small_cluster_ids or not large_cluster_ids:
-            break
-        # Merge the smallest cluster into the nearest large cluster by centroid distance
-        smallest_cid = cluster_sizes.idxmin()
-        dists = np.linalg.norm(centroids - centroids[smallest_cid], axis=1)
-        dists[smallest_cid] = np.inf
-        for cid in range(len(centroids)):
-            if cid not in large_cluster_ids:
-                dists[cid] = np.inf
-        target_cid = int(np.argmin(dists))
-        df.loc[df["cluster_id"] == smallest_cid, "cluster_id"] = target_cid
-
     final_labels, final_centroids = _reindex_labels_and_centroids(
         df["cluster_id"].to_numpy(dtype=np.int64), X_cluster
     )
@@ -1098,28 +1077,6 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
 # ---------------------------------------------------------------------------
 
 
-def _merge_small_clusters(df: pd.DataFrame, centroids: np.ndarray,
-                           min_fraction: float = 0.015):
-    """Merge clusters smaller than ``min_fraction`` of the total into their
-    nearest large cluster by centroid Euclidean distance.  Mutates ``df``.
-    """
-    min_cluster_size = max(1, int(round(len(df) * min_fraction)))
-    while True:
-        cluster_sizes = df["cluster_id"].value_counts()
-        small_cluster_ids = cluster_sizes[cluster_sizes < min_cluster_size].index.tolist()
-        large_cluster_ids = cluster_sizes[cluster_sizes >= min_cluster_size].index.tolist()
-        if not small_cluster_ids or not large_cluster_ids:
-            break
-        smallest_cid = cluster_sizes.idxmin()
-        dists = np.linalg.norm(centroids - centroids[smallest_cid], axis=1)
-        dists[smallest_cid] = np.inf
-        for cid in range(len(centroids)):
-            if cid not in large_cluster_ids:
-                dists[cid] = np.inf
-        target_cid = int(np.argmin(dists))
-        df.loc[df["cluster_id"] == smallest_cid, "cluster_id"] = target_cid
-
-
 def _finalize_clusters(df: pd.DataFrame, labels: np.ndarray, centroids: np.ndarray,
                         X_scaled: np.ndarray, X_cluster: np.ndarray,
                         user_affinity: np.ndarray, projection_feature_columns: list):
@@ -1132,7 +1089,6 @@ def _finalize_clusters(df: pd.DataFrame, labels: np.ndarray, centroids: np.ndarr
     df = df.copy()
     df["cluster_id"] = labels
 
-    _merge_small_clusters(df, centroids)
     final_labels, final_centroids = _reindex_labels_and_centroids(
         df["cluster_id"].to_numpy(dtype=np.int64), X_cluster
     )
@@ -1431,13 +1387,10 @@ BOROUGH_LIST = ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]
 def build_user_feature_vector(profile: dict, restaurant_df: pd.DataFrame) -> np.ndarray:
     """Construct a user feature vector in the same space as restaurant features.
 
-    Differences from the previous version:
-    - Cuisine preferences are expressed as *presence indicators* (max-scaled to
-      1.0), not a normalized probability.  If the user likes Chinese and only
-      Chinese, the Chinese dimension is 1.0 — matching a Chinese restaurant row
-      exactly instead of being divided by the number of likes.
-    - Explicit favorite_cuisines override liked-cuisine averages so the user's
-      stated preferences are never diluted.
+    Cuisine and borough preferences are expressed as presence indicators in the
+    same grouped feature space used by restaurant rows. Explicit profile
+    preferences take priority; liked-restaurant history fills in missing taste
+    signals.
     """
     from utils.clustering import CUISINE_GROUPS, CUISINE_GROUP_MAP, BOROUGH_LIST, BUDGET_TO_PRICE  # type: ignore
 
@@ -1604,7 +1557,7 @@ def _scaled_space(vectors: np.ndarray, scaler: StandardScaler | None):
 
 
 # --------------------------------------------------------------------------
-# New helper: cuisine alignment score (0 → 1+)
+# Cuisine alignment score (0 → 1+)
 # --------------------------------------------------------------------------
 
 def cuisine_alignment_score(profile: dict, cuisine_series: pd.Series,
@@ -1641,7 +1594,7 @@ def cuisine_alignment_score(profile: dict, cuisine_series: pd.Series,
 
 
 # --------------------------------------------------------------------------
-# Replacement for recommend_per_liked_knn
+# Per-liked KNN recommendation
 # --------------------------------------------------------------------------
 
 def recommend_per_liked_knn(
@@ -1657,16 +1610,13 @@ def recommend_per_liked_knn(
     rrf_constant: int = 60,
     profile: dict | None = None,
 ) -> pd.DataFrame:
-    """K-NN recommendation with per-liked fusion + cuisine alignment boost.
+    """K-NN recommendation with per-liked retrieval and RRF fusion.
 
-    New behaviour:
-      - A multiplicative cuisine-alignment term is applied to the fused RRF
-        score, so restaurants whose cuisine matches the user's stated or
-        implicit preferences are ranked higher than equally-similar misses.
-      - When the user has explicit favorite_cuisines, non-matching cuisines
-        are heavily deprioritised (score × 0.15) so Chinese-preferring users
-        see Chinese restaurants first, not Thai restaurants that happen to
-        share a similar price tier.
+    In the demo app, every saved like is treated as one equal positive example:
+    cosine neighbors are retrieved per liked restaurant, then combined with
+    Reciprocal Rank Fusion.  The optional ``profile`` argument is retained for
+    older callers, but Page 5 passes ``profile=None`` so ranking is learned from
+    liked history only.
     """
     from utils.clustering import _scaled_space  # type: ignore
 
@@ -1701,7 +1651,7 @@ def recommend_per_liked_knn(
         result["knn_similarity"] = profile_sim[top]
         result["rrf_score"] = sims[top]
         result["cuisine_boost"] = cuisine_boost[top]
-        result["primary_influencer"] = "Profile preferences"
+        result["primary_influencer"] = "No liked restaurants yet"
         return result.reset_index(drop=True)
 
     liked_scaled = _scaled_space(np.asarray(liked_vectors, dtype=np.float32), scaler)
@@ -1739,7 +1689,7 @@ def recommend_per_liked_knn(
     def _influencer_label(idx):
         src = int(best_source[idx])
         if src < 0:
-            return "Profile preferences"
+            return "liked history"
         if liked_metadata and src < len(liked_metadata):
             meta = liked_metadata[src]
             return str(meta.get("name") or meta.get("dba") or f"liked #{src + 1}")
@@ -1851,7 +1801,6 @@ def collect_liked_vectors(
         metadata.append({
             "restaurant_id": rid,
             "name": like.get("dba") or restaurant_df.iloc[idx].get("name", ""),
-            "rating": float(like.get("rating", 3.0)),
             "cuisine": like.get("cuisine", restaurant_df.iloc[idx].get("cuisine_type", "")),
         })
     if not rows:

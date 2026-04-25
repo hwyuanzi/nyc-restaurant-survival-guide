@@ -11,7 +11,7 @@ from plotly.subplots import make_subplots
 from app.ui_utils import apply_apple_theme
 from utils.clustering import (
     get_clustered_data, find_optimal_k, compute_silhouette,
-    find_silhouette_knee, find_inertia_elbow,
+    find_silhouette_knee, find_inertia_elbow, CLUSTER_SCHEMA_VERSION,
 )
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
 from utils.user_profile import init_session_state, predict_user_cluster
@@ -115,6 +115,13 @@ with st.sidebar:
             st.session_state["k_selection_algo"] = algorithm
             k = best_k
 
+    cluster_request = (algorithm, int(k), CLUSTER_SCHEMA_VERSION)
+    if st.session_state.get("active_cluster_request") != cluster_request:
+        st.session_state["clustered_df"] = None
+        st.session_state["kmeans_model"] = None
+        st.session_state["active_cluster_request"] = cluster_request
+        st.session_state["optimal_k"] = int(k)
+
     if st.button("🔄 Re-run Clustering"):
         st.session_state["clustered_df"] = None
         st.session_state["kmeans_model"] = None
@@ -151,8 +158,8 @@ _n_effective = cdf["cluster_id"].nunique()
 if _n_effective < k:
     st.info(
         f"ℹ️ Requested K = {k}, effective clusters = **{_n_effective}** "
-        f"({k - _n_effective} cluster(s) with < 1.5% of restaurants were merged "
-        f"into their nearest neighbour to prevent degenerate micro-groups)."
+        f"because the selected algorithm produced empty duplicate assignments. "
+        f"No post-hoc cluster merging is applied."
     )
 
 # ── User cluster banner ───────────────────────────────────────────────────────
@@ -345,14 +352,47 @@ map_df = map_df[map_df["lat"].between(40.4774, 40.9176) & map_df["lng"].between(
 cluster_name_map = (
     map_df[["cluster_id", "cluster_label"]]
     .drop_duplicates()
-    .sort_values(["cluster_label", "cluster_id"])
+    .sort_values(["cluster_id"])
 )
-all_cluster_labels = cluster_name_map["cluster_label"].tolist()
-with cluster_filter_placeholder.container():
-    cluster_filter = st.multiselect("Show clusters", options=all_cluster_labels, default=all_cluster_labels)
+cluster_label_by_id = dict(zip(cluster_name_map["cluster_id"], cluster_name_map["cluster_label"]))
+count_by_cluster_id = cdf["cluster_id"].value_counts().to_dict()
+all_cluster_ids = cluster_name_map["cluster_id"].astype(int).tolist()
+pending_filter_ids = st.session_state.pop("pending_map_cluster_filter_ids", None)
 
-if cluster_filter:
-    map_df = map_df[map_df["cluster_label"].isin(cluster_filter)]
+if pending_filter_ids is not None:
+    st.session_state["map_cluster_filter_ids"] = [
+        int(cid) for cid in pending_filter_ids if int(cid) in set(all_cluster_ids)
+    ]
+    st.session_state["map_cluster_filter_k"] = int(k)
+elif st.session_state.get("map_cluster_filter_k") != int(k):
+    st.session_state["map_cluster_filter_ids"] = all_cluster_ids
+    st.session_state["map_cluster_filter_k"] = int(k)
+elif "map_cluster_filter_ids" not in st.session_state:
+    st.session_state["map_cluster_filter_ids"] = all_cluster_ids
+else:
+    valid_ids = set(all_cluster_ids)
+    st.session_state["map_cluster_filter_ids"] = [
+        int(cid) for cid in st.session_state["map_cluster_filter_ids"] if int(cid) in valid_ids
+    ]
+
+def format_cluster_option(cluster_id):
+    label = cluster_label_by_id.get(int(cluster_id), f"Cluster {int(cluster_id) + 1}")
+    count = count_by_cluster_id.get(int(cluster_id), 0)
+    return f"Cluster {int(cluster_id) + 1} · {label} ({count} restaurants)"
+
+with cluster_filter_placeholder.container():
+    cluster_filter_ids = st.multiselect(
+        "Show clusters",
+        options=all_cluster_ids,
+        format_func=format_cluster_option,
+        key="map_cluster_filter_ids",
+    )
+
+if cluster_filter_ids:
+    map_df = map_df[map_df["cluster_id"].isin(cluster_filter_ids)]
+else:
+    st.warning("No clusters selected. Use the filter in the sidebar to show clusters again.")
+    map_df = map_df.iloc[0:0]
 
 # Cluster colors with dimming
 def get_color(cid):
@@ -455,5 +495,6 @@ for i, cid in enumerate(unique_clusters):
         if story:
             st.caption(story)
         if st.button(f"Explore →", key=f"explore_{cid}"):
+            st.session_state["pending_map_cluster_filter_ids"] = [int(cid)]
             st.session_state["selected_cluster_label"] = label
-            st.info(f"Use the taste-cluster filter on Home or Semantic Search to explore {label}.")
+            st.rerun()

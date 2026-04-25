@@ -12,7 +12,7 @@ This file is for the team only. It collects likely presentation questions, short
   - `K-Means++` initialization for more stable centroid seeding.
   - Euclidean distance because features are standardized into a shared scale.
   - Multi-start fitting with several random seeds and selection by silhouette score.
-  - Small-cluster merging to avoid degenerate tiny groups in the final UX.
+  - A stable schema that preserves the requested `K` clusters so the number chosen in the UI matches the number shown in the demo.
 
 ### Technical correctness
 
@@ -71,7 +71,7 @@ A: They let us compare different geometry assumptions. GMM allows Gaussian compo
 
 ### Q: How did you choose K?
 
-A: We expose K as a parameter, but the app also provides an automatic suggestion using silhouette score in the same reduced clustering space. That gives a data-driven starting point instead of an arbitrary number.
+A: We expose K as a parameter, but the app also provides an automatic suggestion using silhouette score in the same clustering feature space. We use that as a data-driven starting point, then sanity-check that no single catch-all cluster dominates the result and that the labels/prototypes remain interpretable.
 
 ### Q: Why not cluster on raw map coordinates only?
 
@@ -85,9 +85,9 @@ A: We intentionally moved clustering to interpretable restaurant attributes so w
 
 A: We do not rely on the PCA picture alone. We also report silhouette score, cluster-size balance, centroid distances, and representative restaurants nearest to each centroid. Those provide quantitative and qualitative evidence.
 
-### Q: Why merge very small clusters?
+### Q: Why keep small clusters instead of merging them away?
 
-A: Tiny clusters can be unstable and hard to explain in a live demo. We merge undersized clusters into the nearest larger centroid so the final result is more robust and more usable for the audience.
+A: The UI should be faithful to the selected value of K. Small clusters can also be useful because they often represent niche or geographically distinct restaurant segments. If a cluster is tiny, we explain it with its centroid drivers and prototype restaurants instead of hiding it through post-processing.
 
 ### Q: Are the clusters personalized per user?
 

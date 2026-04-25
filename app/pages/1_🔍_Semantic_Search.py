@@ -94,15 +94,12 @@ def render_card(row, api_key, profile_name, rank):
 
 
 profile = get_active_profile()
-
-with st.sidebar:
-    st.title("🔎 Search Settings")
-    refresh_cache = st.checkbox("Refresh cached Google Places sample", value=False)
-    boro_filter = st.selectbox("Borough", ["All", "Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"])
-    grade_filter = st.selectbox("Health Grade", ["All", "A", "B", "C"])
-    min_rating = st.slider("Min Google Rating", 0.0, 5.0, 3.5, 0.5)
-    min_match = st.slider("Minimum Match", 20, 85, 45, 5, format="%d%%") / 100
-    top_k = st.slider("Results to show", 3, 20, 8)
+refresh_cache = False
+boro_filter = "All"
+grade_filter = "All"
+min_rating = 0.0
+min_match = 0.45
+top_k = 8
 
 st.title("🔎 Semantic Restaurant Search")
 st.markdown("Describe a craving, vibe, or occasion. Results are personalized using your saved profile and likes.")
@@ -121,37 +118,7 @@ if enriched_df.empty:
 
 clustered_df = st.session_state.get("clustered_df")
 if clustered_df is not None and not clustered_df.empty and "cluster_label" in clustered_df.columns:
-    cluster_names_map = {"All Clusters": "All Clusters"}
-    raw_labels = sorted(clustered_df["cluster_label"].dropna().unique().tolist())
-    
-    for lbl in raw_labels:
-        cuisine_col = "cuisine" if "cuisine" in clustered_df.columns else "cuisine_type" if "cuisine_type" in clustered_df.columns else None
-        if cuisine_col:
-            top_cuisines = clustered_df[clustered_df["cluster_label"] == lbl][cuisine_col].value_counts().head(2).index.tolist()
-            cuisine_str = " & ".join(top_cuisines) if top_cuisines else "Mixed"
-            display_name = f"{lbl} ({cuisine_str})"
-        else:
-            display_name = str(lbl)
-        cluster_names_map[lbl] = display_name
-
-    cluster_options = ["All Clusters"] + raw_labels
-    preselected_label = st.session_state.get("selected_cluster_label", "All Clusters")
-    selected_index = raw_labels.index(preselected_label) + 1 if preselected_label in raw_labels else 0
-    
-    with st.sidebar:
-        st.markdown("---")
-        cluster_filter_label = st.selectbox(
-            "Taste Cluster", 
-            cluster_options, 
-            index=selected_index,
-            format_func=lambda x: cluster_names_map[x],
-            help="Clusters are automatically generated in an interpretable restaurant feature space using cuisine, price, rating, health, borough, and location signals."
-        )
-    st.session_state["selected_cluster_label"] = cluster_filter_label
-    if cluster_filter_label != "All Clusters":
-        valid_ids = clustered_df.loc[clustered_df["cluster_label"] == cluster_filter_label, "restaurant_id"].astype(str)
-        enriched_df = enriched_df[enriched_df["camis"].astype(str).isin(valid_ids)].reset_index(drop=True)
-        runtime_df = runtime_df[runtime_df["restaurant_id"].isin(valid_ids)].reset_index(drop=True)
+    st.session_state["selected_cluster_label"] = "All Clusters"
 
 if enriched_df.empty or "description" not in enriched_df.columns:
     st.warning("No restaurants are available for the current filters yet. Try clearing the cluster filter or rebuilding the cache.")
@@ -191,7 +158,7 @@ results = semantic_search(
 )
 
 if results.empty:
-    st.info("No strong matches found. Try lowering the minimum match, adjusting filters, or rephrasing your query.")
+    st.info("No strong matches found. Try rephrasing your query.")
 else:
     st.success(f"Found {len(results)} matches for *{query}*")
     for rank, (_, row) in enumerate(results.iterrows(), start=1):

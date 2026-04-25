@@ -10,7 +10,7 @@ from app.ui_utils import apply_apple_theme
 from utils.google_places import build_photo_url, get_google_api_key
 from utils.search import price_label, semantic_search, stars
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
-from utils.user_profile import add_liked_restaurant, init_session_state, render_profile_sidebar
+from utils.user_profile import add_liked_restaurant, get_active_profile, init_session_state
 
 EXAMPLES = [
     "cozy Italian pasta spot in Brooklyn",
@@ -43,9 +43,9 @@ if "authenticated_profile_id" not in st.session_state:
 if not st.session_state["authenticated_profile_id"]:
     st.title("🍽️ NYC Restaurant Survival Guide")
     st.markdown("Please log in or create an account to start searching and saving your favorite restaurants.")
-    
+
     tab_login, tab_signup = st.tabs(["Login", "Sign Up"])
-    
+
     with tab_login:
         login_username = st.text_input("Username", key="login_username")
         login_password = st.text_input("Password", type="password", key="login_password")
@@ -56,7 +56,7 @@ if not st.session_state["authenticated_profile_id"]:
                 st.rerun()
             else:
                 st.error("Invalid username or password. (If you have an old account without a password, try logging in with an empty password.)")
-                
+
     with tab_signup:
         signup_username = st.text_input("Choose a Username", key="signup_username")
         signup_password = st.text_input("Choose a Password", type="password", key="signup_password")
@@ -126,17 +126,20 @@ def render_card(row, api_key, profile_name, rank):
 
 
 with st.sidebar:
-    profile = render_profile_sidebar()
-    st.markdown("---")
-    st.title("🔎 Search Filters")
-    boro_filter = st.selectbox("Borough", ["All", "Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"])
-    grade_filter = st.selectbox("Health Grade", ["All", "A", "B", "C"])
-    min_rating = st.slider("Min Google Rating", 0.0, 5.0, 3.5, 0.5)
-    top_k = st.slider("Results to show", 3, 20, 8)
-    force_refresh = st.checkbox("Rebuild prepared search cache", value=False)
+    profile = get_active_profile()
+    st.title(f"👤 Welcome, {profile.get('name', 'Guest')}")
+    if st.button("Logout", use_container_width=True, key="main_logout"):
+        st.session_state["authenticated_profile_id"] = None
+        st.rerun()
+
+boro_filter = "All"
+grade_filter = "All"
+min_rating = 0.0
+top_k = 8
+force_refresh = False
 
 st.title("🍽️ NYC Restaurant Recommender")
-st.markdown("Find restaurants in New York City using personalized recommendations, semantic search, and a 3D Manhattan preference map.")
+st.markdown("Find NYC restaurants using semantic search, saved likes, health inspection context, and interpretable restaurant clusters.")
 
 hero_left, hero_right = st.columns([3, 2])
 with hero_left:
@@ -146,9 +149,9 @@ with hero_left:
         This app combines NYC inspection data, Google Places enrichment, and a persistent user profile to help each user discover restaurants they are more likely to enjoy.
 
         It includes:
-        - Personalized recommendations scored from `1-10`
+        - Liked-history recommendations using nearest neighbors, rank fusion, and diversity reranking
         - A semantic search page that understands cravings and occasions
-        - A 3D Manhattan tower map showing clusters of strong matches
+        - A Restaurant Cluster GIS Map showing learned restaurant segments across NYC
         - A profile survey plus saved likes so recommendations improve over time
         """
     )
@@ -157,10 +160,10 @@ with hero_right:
         """
         **Best flow**
 
-        1. Fill out your profile survey in the sidebar on any page
-        2. Visit **Recommendations** for your baseline picks
+        1. Search or browse restaurants you already like and save them
+        2. Visit **Recommendations** to get liked-history picks
         3. Use the search box below for specific cravings
-        4. Explore **3D Manhattan Map** for where your best-fit options cluster
+        4. Explore **Restaurant Cluster GIS Map** to understand learned restaurant segments
         """
     )
 
@@ -169,13 +172,13 @@ st.markdown("---")
 col1, col2, col3 = st.columns(3)
 with col1:
     st.subheader("🔮 Recommendations")
-    st.write("See a predicted enjoyment score for each restaurant based on your survey answers, likes, boroughs, cuisines, budget, and quality signals.")
+    st.write("Get restaurant recommendations from your saved likes using per-liked nearest neighbors, rank fusion, and diversity reranking.")
 with col2:
     st.subheader("🔎 Semantic Search")
     st.write("Describe what you want in plain English and get search results ranked using embeddings, keyword overlap, restaurant quality, and your user profile.")
 with col3:
-    st.subheader("📍 3D Manhattan Map")
-    st.write("View tower heights across Manhattan, where taller columns represent more restaurants above your personal `7/10` threshold.")
+    st.subheader("📍 Cluster GIS Map")
+    st.write("View restaurants across NYC, colored by clusters learned from cuisine, price, rating, health, borough, and location signals.")
 
 st.markdown("---")
 st.subheader("Performance Improvements")
@@ -198,49 +201,10 @@ if prepared_df.empty:
 cluster_filter_label = "All Clusters"
 clustered_df = st.session_state.get("clustered_df")
 if clustered_df is not None and not clustered_df.empty and "cluster_label" in clustered_df.columns:
-    # Dynamically generate meaningful names for clusters based on top cuisines to improve UI/UX clarity
-    cluster_names_map = {"All Clusters": "All Clusters"}
-    raw_labels = sorted(clustered_df["cluster_label"].dropna().unique().tolist())
-    
-    for lbl in raw_labels:
-        # Get top 2 most common cuisines in this cluster to give it a descriptive name
-        if "cuisine" in clustered_df.columns:
-            top_cuisines = clustered_df[clustered_df["cluster_label"] == lbl]["cuisine"].value_counts().head(2).index.tolist()
-            cuisine_str = " & ".join(top_cuisines) if top_cuisines else "Mixed"
-            display_name = f"{lbl} ({cuisine_str})"
-        else:
-            display_name = str(lbl)
-        cluster_names_map[lbl] = display_name
-
-    cluster_options = ["All Clusters"] + raw_labels
-    # Create a reverse map for selectbox
-    display_to_raw = {v: k for k, v in cluster_names_map.items()}
-    display_options = ["All Clusters"] + [cluster_names_map[lbl] for lbl in raw_labels]
-    
-    preselected_label = st.session_state.get("selected_cluster_label", "All Clusters")
-    
-    # Find index based on raw label matching
-    selected_index = raw_labels.index(preselected_label) + 1 if preselected_label in raw_labels else 0
-    
-    with st.sidebar:
-        st.markdown("---")
-        # Use the format_func to display meaningful names to the user
-        cluster_filter_label = st.selectbox(
-            "Taste Cluster", 
-            cluster_options, 
-            index=selected_index,
-            format_func=lambda x: cluster_names_map[x],
-            help="Clusters are automatically generated in an interpretable restaurant feature space using cuisine, price, rating, health, borough, and location signals."
-        )
-    st.session_state["selected_cluster_label"] = cluster_filter_label
-    if cluster_filter_label != "All Clusters":
-        valid_ids = clustered_df.loc[clustered_df["cluster_label"] == cluster_filter_label, "restaurant_id"].astype(str)
-        prepared_df = prepared_df[prepared_df["camis"].astype(str).isin(valid_ids)].reset_index(drop=True)
-        runtime_df = runtime_df[runtime_df["restaurant_id"].isin(valid_ids)].reset_index(drop=True)
-        st.session_state["raw_df"] = runtime_df
+    st.session_state["selected_cluster_label"] = "All Clusters"
 
 if prepared_df.empty or "description" not in prepared_df.columns:
-    st.warning("No restaurants are available for the current filters yet. Try clearing the cluster filter or rebuilding the search cache.")
+    st.warning("No restaurants are available for the current filters yet. Try reloading the search cache.")
     st.stop()
 
 status_col1, status_col2, status_col3 = st.columns(3)
@@ -248,7 +212,7 @@ status_col1.metric("Restaurants Loaded", f"{cache_info.get('base_rows', len(prep
 status_col2.metric("Google-Enriched Rows", f"{cache_info.get('enriched_rows', 0):,}")
 status_col3.metric("Embeddings", "Ready" if embeddings is not None else "Lexical fallback")
 
-st.caption("Use the page navigation in the sidebar to jump into Recommendations, Semantic Search, PCA Explorer, or the 3D Manhattan Map.")
+st.caption("Use the page navigation in the sidebar to jump into Recommendations, Semantic Search, PCA Explorer, or the Restaurant Cluster GIS Map.")
 
 st.markdown("---")
 st.subheader("Search From Home")
@@ -281,7 +245,7 @@ results = semantic_search(
 )
 
 if results.empty:
-    st.info("No results found. Try adjusting your filters or rephrasing your query.")
+    st.info("No results found. Try rephrasing your query.")
 else:
     st.success(f"Found {len(results)} matches for *{query}*")
     for rank, (_, row) in enumerate(results.iterrows(), start=1):

@@ -242,10 +242,7 @@ def profile_to_user_history(profile, restaurant_df=None):
             continue
         if restaurant_id not in visited_ids:
             visited_ids.append(restaurant_id)
-        try:
-            rated[restaurant_id] = float(item.get("rating", 5.0))
-        except (TypeError, ValueError):
-            rated[restaurant_id] = 5.0
+        rated[restaurant_id] = 1.0
     return {
         "visited_ids": visited_ids,
         "rated": rated,
@@ -352,15 +349,9 @@ def predict_user_cluster(user_history, df_clustered, kmeans, scaler):
     if visited.empty:
         return -1
 
-    rated = user_history.get("rated", {})
     cluster_votes = (
-        visited.assign(
-            vote_weight=visited["restaurant_id"].astype(str).map(
-                lambda restaurant_id: float(rated.get(restaurant_id, 3.0)) / 5.0
-            )
-        )
-        .groupby("cluster_id")["vote_weight"]
-        .sum()
+        visited.groupby("cluster_id")
+        .size()
         .sort_values(ascending=False)
     )
     if not cluster_votes.empty and len(cluster_votes) == 1:
@@ -569,7 +560,6 @@ def add_liked_restaurant(profile_name, restaurant_row, source="app"):
         "boro": restaurant_row.get("boro") or restaurant_row.get("neighborhood", ""),
         "grade": restaurant_row.get("grade", "N/A"),
         "score": int(pd.to_numeric(restaurant_row.get("score", 0), errors="coerce") or 0),
-        "rating": 5.0,
         "source": source,
         "liked_at": _now_iso(),
     }

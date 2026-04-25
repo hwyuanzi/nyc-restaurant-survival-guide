@@ -50,9 +50,17 @@ st.title("📊 PCA Embedding Explorer")
 st.markdown("""
 This page uses the **same clustering pipeline as Restaurant Cluster GIS Map** and projects those clusters into 3D for analysis. The model works on **fully interpretable features**: cuisine type, price tier, Google rating, review volume, health inspection score, borough, and geographic location.
 
-💡 **How to read this chart:** Each axis is a Principal Component that combines the original features.
+💡 **How to read this chart:** In **Principal Components** layout, each axis is a PCA component that combines the original 18 input features. In **Cleaner Cluster View**, the points are arranged from distances to cluster centroids so cluster separation is easier to see; it is a visualization of the same learned clusters, not a different clustering model.
 Check the **Feature Loadings** and **Cluster Evidence** sections below to see exactly which features drive each cluster and which restaurants sit closest to each centroid.
 """)
+
+
+def format_price_tier_mean(value):
+    numeric_value = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric_value):
+        return "N/A"
+    nearest_tier = int(np.clip(round(float(numeric_value)), 1, 4))
+    return f"{float(numeric_value):.2f} / 4 (~{'$' * nearest_tier})"
 
 if "raw_df" not in st.session_state or st.session_state["raw_df"] is None:
     with st.spinner("Loading prepared restaurant data..."):
@@ -129,7 +137,23 @@ with st.sidebar:
     projection_mode = st.selectbox(
         "Layout",
         ["Cleaner Cluster View", "Principal Components", "t-SNE (visualization only)"],
-        index=0,
+        index=1,
+    )
+
+if projection_mode == "Cleaner Cluster View":
+    st.caption(
+        "Layout note: this view uses each restaurant's distances to all cluster centroids, "
+        "then projects that distance profile into 3D. It is cleaner for seeing cluster separation, "
+        "but the axes are not raw PCA components."
+    )
+elif projection_mode == "Principal Components":
+    st.caption(
+        "Layout note: this is the direct 3D PCA projection of the scaled 18-feature restaurant space. "
+        "The first three PCs are only a compressed view, so visual overlap does not mean the high-dimensional clusters are identical."
+    )
+else:
+    st.caption(
+        "Layout note: t-SNE is for visualization only. It preserves local neighborhoods but should not be used to explain the actual K-Means objective."
     )
 
 projection_columns = (
@@ -516,7 +540,12 @@ overall_health = pd.to_numeric(cdf.get("score", pd.Series(np.nan, index=cdf.inde
 e1, e2, e3, e4 = st.columns(4)
 e1.metric("Restaurants", f"{len(focus_df)}")
 e2.metric("Avg Rating", f"{focus_df['avg_rating'].mean():.2f}", delta=f"{focus_df['avg_rating'].mean() - overall_rating:+.2f} vs all")
-e3.metric("Avg Price Tier", f"{focus_df['price_tier'].mean():.2f}", delta=f"{focus_df['price_tier'].mean() - overall_price:+.2f} vs all")
+e3.metric(
+    "Avg Price Tier",
+    format_price_tier_mean(focus_df["price_tier"].mean()),
+    delta=f"{focus_df['price_tier'].mean() - overall_price:+.2f} vs all",
+    help="Google Places price tier: 1=$, 2=$$, 3=$$$, 4=$$$$. This is an average tier, not a dollar amount.",
+)
 focus_health = pd.to_numeric(focus_df.get("score", pd.Series(np.nan, index=focus_df.index)), errors="coerce").mean()
 e4.metric("Avg Inspection Score", f"{focus_health:.1f}", delta=f"{focus_health - overall_health:+.1f} vs all")
 
@@ -550,6 +579,10 @@ summary = cdf.groupby(["cluster_id", "cluster_label"]).agg(
     Key_Drivers=("cluster_key_drivers", "first"),
 ).reset_index()
 summary["Avg_Rating"] = summary["Avg_Rating"].round(2)
-summary["Avg_Price"] = summary["Avg_Price"].round(2)
-st.dataframe(summary[["cluster_label", "Restaurants", "Avg_Rating", "Avg_Price", "Top_Cuisine", "Key_Drivers"]],
+summary["Avg_Price_Tier"] = summary["Avg_Price"].map(format_price_tier_mean)
+st.caption(
+    "Average price is the mean Google Places price tier, where 1=$ and 4=$$$$. "
+    "Most restaurants in this dataset are between tier 1 and 2, so many clusters are naturally budget-to-mid-range rather than upscale."
+)
+st.dataframe(summary[["cluster_label", "Restaurants", "Avg_Rating", "Avg_Price_Tier", "Top_Cuisine", "Key_Drivers"]],
              use_container_width=True, hide_index=True)
