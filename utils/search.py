@@ -17,7 +17,7 @@ QUERY_CUISINE_HINTS = {
     # Italian / Pizza
     "italian": {"Italian"}, "pasta": {"Italian"}, "pizza": {"Pizza", "Italian"},
     "risotto": {"Italian"}, "tiramisu": {"Italian", "Bakery"}, "antipasto": {"Italian"},
-    "gelato": {"Ice Cream", "Italian"}, "wine": {"Italian", "French", "Spanish"},
+    "gelato": {"Ice Cream", "Italian"},
     
     # Chinese
     "chinese": {"Chinese"}, "dim sum": {"Chinese"}, "dumpling": {"Chinese"}, "dumplings": {"Chinese"},
@@ -175,6 +175,13 @@ PRICE_HINTS = {
     "high end": 4,
 }
 
+CUISINE_MATCH_ALIASES = {
+    "Vietnamese": {
+        "vietnamese", "southeast asian", "asian/asian fusion",
+        "pho", "banh mi", "saigon", "viet",
+    },
+}
+
 
 def stars(rating):
     if not rating:
@@ -275,6 +282,19 @@ def lexical_score(query, text):
         return 0.0
     matches = _count_token_matches(query_tokens, text)
     return matches / len(query_tokens)
+
+
+def _cuisine_intent_match(target_cuisines, cuisine_value, searchable_text=""):
+    cuisine_text = str(cuisine_value or "").lower()
+    combined_text = f"{cuisine_text} {str(searchable_text or '').lower()}"
+    for target in target_cuisines:
+        target_lower = str(target).lower()
+        aliases = CUISINE_MATCH_ALIASES.get(target, {target_lower})
+        if target_lower in cuisine_text:
+            return 1.0
+        if any(alias in combined_text for alias in aliases):
+            return 1.0
+    return 0.0
 
 
 def _normalize_location_text(value):
@@ -523,6 +543,7 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
         try:
             query_embedding = model.encode([expanded_query], normalize_embeddings=True)
             similarities = np.dot(embeddings, query_embedding.T).squeeze()
+            semantic_scores = np.asarray(similarities, dtype=float)
             # Scale similarities so the top match is boosted towards 0.85
             # This prevents pure semantic queries (like "cozy") from being fully 
             # blocked by the absolute min_match=0.55 threshold.
@@ -549,9 +570,14 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
 
     cuisine_boost = np.zeros(len(df))
     if intent["desired_cuisines"]:
-        cuisine_boost = cuisine_series.apply(
-            lambda value: 1.0 if any(target.lower() in str(value).lower() for target in intent["desired_cuisines"]) else 0.0
-        ).to_numpy()
+        cuisine_boost = np.array([
+            _cuisine_intent_match(
+                intent["desired_cuisines"],
+                cuisine_series.iloc[i],
+                f"{df['description'].iloc[i]} {summary_series.iloc[i]} {df['dba'].iloc[i]}",
+            )
+            for i in range(len(df))
+        ])
     cuisine_query_present = len(intent["desired_cuisines"]) > 0
     structured_intent_present = bool(
         intent["has_location"] or cuisine_query_present or intent["desired_price"] is not None
@@ -715,5 +741,4 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
     ranked_indices = valid_indices[np.argsort(filtered_scores[valid_indices])[::-1][:top_k]]
     results = df.iloc[ranked_indices].copy()
     results["similarity"] = filtered_scores[ranked_indices]
-    results["match_percent"] = np.round(np.clip(results["similarity"], 0, 1) * 100).astype(int)
     return results.reset_index(drop=True)

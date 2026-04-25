@@ -72,7 +72,6 @@ if not st.session_state["authenticated_profile_id"]:
 
 
 def render_card(row, api_key, profile_name, rank):
-    pct = int(row.get("match_percent", round(row["similarity"] * 100)))
     grade = row.get("grade", "N/A")
     rating = row.get("g_rating")
     reviews = row.get("g_reviews")
@@ -109,24 +108,20 @@ def render_card(row, api_key, profile_name, rank):
             description = description[:317] + "..."
         st.write(description)
 
-        metric_col, action_col = st.columns([1, 2])
-        with metric_col:
-            st.metric("Match", f"{pct}%")
-        with action_col:
-            if maps_url:
-                st.markdown(f"[📍 Open in Google Maps]({maps_url})")
-            
-            from utils.user_profile import is_restaurant_liked, remove_liked_restaurant
-            if is_restaurant_liked(profile_name, row):
-                if st.button("❤️ Unlike this restaurant", key=f"home_unlike_{rank}_{row.get('camis', name)}"):
-                    if remove_liked_restaurant(profile_name, row):
-                        st.success("Removed from your profile.")
-                        st.rerun()
-            else:
-                if st.button("🤍 Like this restaurant", key=f"home_like_{rank}_{row.get('camis', name)}"):
-                    if add_liked_restaurant(profile_name, row, source="home_search"):
-                        st.success("Saved to your profile.")
-                        st.rerun()
+        if maps_url:
+            st.markdown(f"[📍 Open in Google Maps]({maps_url})")
+
+        from utils.user_profile import is_restaurant_liked, remove_liked_restaurant
+        if is_restaurant_liked(profile_name, row):
+            if st.button("❤️ Unlike this restaurant", key=f"home_unlike_{rank}_{row.get('camis', name)}"):
+                if remove_liked_restaurant(profile_name, row):
+                    st.success("Removed from your profile.")
+                    st.rerun()
+        else:
+            if st.button("🤍 Like this restaurant", key=f"home_like_{rank}_{row.get('camis', name)}"):
+                if add_liked_restaurant(profile_name, row, source="home_search"):
+                    st.success("Saved to your profile.")
+                    st.rerun()
     st.divider()
 
 
