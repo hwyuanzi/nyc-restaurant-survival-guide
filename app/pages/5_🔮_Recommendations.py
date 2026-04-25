@@ -324,7 +324,6 @@ from utils.clustering import (
     recommend_per_liked_knn,
     apply_mmr,
     collect_liked_vectors,
-    TOP_CUISINES,
     BOROUGH_LIST,
 )
 import plotly.graph_objects as go
@@ -428,8 +427,8 @@ st.markdown("---")
 st.subheader("🎯 Recommended Restaurants")
 st.caption(
     "Restaurants ranked by cosine similarity to your taste profile in the "
-    "interpretable 22-dim feature space (price, cuisine, borough, rating, "
-    "health, location).  The *Influenced by* column shows which liked "
+    "interpretable 18-dim feature space (price, cuisine group, borough, "
+    "rating, health, location).  The *Influenced by* column shows which liked "
     "restaurant contributed each pick's best rank under RRF."
 )
 

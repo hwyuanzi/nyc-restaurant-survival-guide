@@ -1,34 +1,10 @@
 """
-The problem we are fixing:
-  If a user likes 4 Chinese restaurants OR sets "Chinese" as a favorite cuisine,
-  the top-15 recommendations should be dominated by Chinese restaurants — not
-  Thai, Japanese, etc. that happen to match on price/rating/location.
+Restaurant clustering and recommendation helpers.
 
-Root causes identified:
-  1. build_user_feature_vector normalizes the cuisine one-hot to sum=1, diluting
-     the Chinese signal when there are multiple likes.
-  2. Non-top-10 cuisines (Thai, Indian, Vietnamese, Korean, ...) all collapse
-     into the single "cuisine_Other" bucket.  If a Thai restaurant and a
-     Vietnamese restaurant both have cuisine_Other=1, they look identical on
-     the cuisine axis even though they are very different cuisines.
-  3. Price (× 1.5) and Rating (× 1.3) outweigh any individual cuisine dimension
-     (× 0.8), so a Thai restaurant with matching price/rating can beat a
-     Chinese restaurant with slightly mismatched price/rating.
-
-Fixes:
-  A. Strengthen the user's cuisine signal in build_user_feature_vector so a
-     single cuisine preference produces a full 1.0 in that dimension.
-  B. Add a cuisine_boost() post-filter: after K-NN returns top-N candidates,
-     boost restaurants whose cuisine matches either the user's favorite_cuisines
-     or the cuisines of their likes, and penalize mismatches.  This lives
-     *outside* the cosine similarity so we can tune it without retraining.
-  C. Keep the existing interpretable-feature cosine search for ranking within
-     a cuisine family (since that's still where price/rating/location matter).
-
-Paste these into utils/clustering.py, replacing:
-  - build_user_feature_vector  (lines ~1020-1112)
-  - recommend_per_liked_knn    (lines ~1177-1291)
-And add a new helper cuisine_score_boost() right before recommend_per_liked_knn.
+The clustering demo uses an 18-dimensional, human-readable feature space:
+six numeric signals, seven cuisine-group indicators, and five borough
+indicators.  Raw cuisine strings are grouped before one-hot encoding so that
+rare cuisines no longer collapse into one giant "Other" bucket.
 """
 
 import os
@@ -59,7 +35,7 @@ ALGO_CACHE_PATHS = {
     "agglomerative": ("data/cluster_cache_agglo.parquet", "data/cluster_model_agglo.joblib"),
 }
 CACHE_TTL  = 86400  # 24 hours
-CLUSTER_SCHEMA_VERSION = 22  # Scratch K-Means + stable global clusters + profile labels
+CLUSTER_SCHEMA_VERSION = 25  # Cuisine grouping: 6 broad groups replace 10 individual one-hots
 TSNE_MAX_ROWS = 3500
 
 try:
@@ -70,11 +46,76 @@ except ImportError:
 
 REQUIRED_COLUMNS = ["restaurant_id", "name", "lat", "lng", "cuisine_type", "price_tier", "avg_rating", "review_count"]
 
-# Top cuisines to one-hot encode (rest → "Other"); chosen for interpretability
-TOP_CUISINES = [
-    "American", "Chinese", "Italian", "Mexican", "Japanese",
-    "Pizza", "Coffee/Tea", "Donuts", "Hamburgers", "Chicken",
-]
+# Broad cuisine groups for clustering (replaces 10 individual one-hots + Other).
+# Grouping reduces the "Other" catch-all from ~43% to ~7%, giving K-Means
+# real cuisine signal to split on instead of collapsing mixed cuisines.
+CUISINE_GROUPS = ["American", "Asian", "Latin", "Cafe", "Italian", "European"]
+
+# Maps raw cuisine_type strings → one of the 6 CUISINE_GROUPS (or "Other")
+CUISINE_GROUP_MAP: dict[str, str] = {
+    # American comfort / fast food
+    "American":              "American",
+    "Hamburgers":            "American",
+    "Chicken":               "American",
+    "Sandwiches":            "American",
+    "New American":          "American",
+    "Barbecue":              "American",
+    "Soul Food":             "American",
+    "Pancakes/Waffles":      "American",
+    "Steakhouse":            "American",
+    "Bagels/Pretzels":       "American",
+    "Soups/Salads/Mixed Buffet": "American",
+    "Soups & Salads":        "American",
+    # Asian (East, South, Southeast, Middle East)
+    "Chinese":               "Asian",
+    "Japanese":              "Asian",
+    "Thai":                  "Asian",
+    "Korean":                "Asian",
+    "Asian/Asian Fusion":    "Asian",
+    "Indian":                "Asian",
+    "Southeast Asian":       "Asian",
+    "Middle Eastern":        "Asian",
+    "Turkish":               "Asian",
+    "Hawaiian":              "Asian",
+    "Filipino":              "Asian",
+    "Vietnamese":            "Asian",
+    "Chinese/Cuban":         "Asian",
+    # Latin
+    "Mexican":               "Latin",
+    "Latin American":        "Latin",
+    "Tex-Mex":               "Latin",
+    "Caribbean":             "Latin",
+    "Spanish":               "Latin",
+    "Peruvian":              "Latin",
+    "Brazilian":             "Latin",
+    "Cuban":                 "Latin",
+    "Colombian":             "Latin",
+    "Dominican":             "Latin",
+    "Venezuelan":            "Latin",
+    # Cafe / sweets / beverages
+    "Coffee/Tea":                      "Cafe",
+    "Donuts":                          "Cafe",
+    "Bakery Products/Desserts":        "Cafe",
+    "Juice, Smoothies, Fruit Salads":  "Cafe",
+    "Frozen Desserts":                 "Cafe",
+    "Bottled Beverages":               "Cafe",
+    "Ice Cream, Gelato, Yogurt, Ices": "Cafe",
+    "Dessert":                         "Cafe",
+    # Italian & pizza
+    "Italian":     "Italian",
+    "Pizza":       "Italian",
+    # European
+    "French":            "European",
+    "Mediterranean":     "European",
+    "Eastern European":  "European",
+    "Greek":             "European",
+    "Irish":             "European",
+    "Jewish/Kosher":     "European",
+    "Continental":       "European",
+    "Australian":        "European",
+    "German":            "European",
+    "Russian":           "European",
+}
 
 # Human-readable labels for every clustering feature
 FEATURE_LABELS = {
@@ -86,9 +127,9 @@ FEATURE_LABELS = {
     "lng_norm": "East–west location",
     "user_affinity": "User affinity",
 }
-# Dynamically add cuisine and borough labels
-for _c in TOP_CUISINES:
-    FEATURE_LABELS[f"cuisine_{_c}"] = f"Cuisine: {_c}"
+# Dynamically add cuisine group and borough labels
+for _g in CUISINE_GROUPS:
+    FEATURE_LABELS[f"cuisine_{_g}"] = f"Cuisine: {_g}"
 FEATURE_LABELS["cuisine_Other"] = "Cuisine: Other"
 for _b in ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]:
     FEATURE_LABELS[f"boro_{_b}"] = f"Borough: {_b}"
@@ -279,8 +320,9 @@ def _cuisine_persona(cuisine_counts, top_n=3):
 
     first_name, first_share = top_list[0]
 
-    if first_share >= 0.40:
-        # Single-cuisine dominant cluster
+    if first_share >= 0.30:
+        # Single-cuisine dominant cluster (lowered from 0.40 — in a city with
+        # 200+ cuisine types, 30% for one cuisine is genuinely dominant)
         return first_name, top_list, False
 
     if len(top_list) >= 2:
@@ -339,14 +381,14 @@ def _build_cluster_profiles(df: pd.DataFrame) -> pd.DataFrame:
         avg_health = pd.to_numeric(cluster_df.get("score", pd.Series(np.nan,
                                    index=cluster_df.index)), errors="coerce").mean()
  
-        # ---- Cuisine mix ----
-        cuisine_counts = (
-            cluster_df["cuisine_type"].fillna("")
-            .astype(str).str.strip()
-            .replace({"0": ""})
-            .value_counts(normalize=True)
+        # ---- Cuisine mix (mapped to groups for clustering-consistent labeling) ----
+        cuisine_raw = (
+            cluster_df["cuisine_type"].fillna("").astype(str).str.strip().replace({"0": ""})
         )
-        cuisine_counts = cuisine_counts[cuisine_counts.index != ""]
+        cuisine_grouped = cuisine_raw.map(lambda x: CUISINE_GROUP_MAP.get(x, "Other") if x else "")
+        cuisine_counts = (
+            cuisine_grouped[cuisine_grouped != ""].value_counts(normalize=True)
+        )
         cuisine_persona, top_cuisines, cuisine_is_mixed = _cuisine_persona(
             cuisine_counts, top_n=3,
         )
@@ -367,35 +409,48 @@ def _build_cluster_profiles(df: pd.DataFrame) -> pd.DataFrame:
         rating_label = _rating_persona(avg_rating, review_med)
  
         # ---- Assemble the label ----
-        # We want the label to answer: who is this cluster for?
-        # Format: "[Cuisine persona] · [Borough if concentrated] · [Price/Quality]"
+        # Priority: lead with what MOST distinguishes this cluster.
+        # "Mixed Cuisine" is never used as a label — when cuisine is mixed,
+        # geography → price → rating becomes the primary signal instead.
+        price_delta  = (avg_price  or global_price)  - global_price
+        rating_delta = (avg_rating or global_rating) - global_rating
         label_parts: list[str] = []
-        if cuisine_persona:
+
+        if not cuisine_is_mixed:
+            # Cuisine-defined cluster: cuisine is the primary identifier
             label_parts.append(cuisine_persona)
-        if geographic:
-            label_parts.append(geographic)
-        # Pick the more distinctive of {price, quality} for the third slot.
-        # Distinctiveness = how far from the global mean.
-        distinctive: str | None = None
-        price_delta = abs((avg_price or global_price) - global_price)
-        rating_delta = abs((avg_rating or global_rating) - global_rating)
-        if price_label and price_delta >= 0.25:
-            distinctive = price_label
-        if rating_label and rating_delta >= 0.2:
-            # Rating is more evocative — override if it's distinctive too
-            distinctive = rating_label
-        if distinctive:
-            label_parts.append(distinctive)
- 
-        if not label_parts:
-            label_parts = [f"Cluster {cluster_id}"]
- 
+            if geographic:
+                label_parts.append(geographic)
+            elif price_label and abs(price_delta) >= 0.20:
+                label_parts.append(price_label)
+            elif rating_label and abs(rating_delta) >= 0.15:
+                label_parts.append(rating_label)
+        else:
+            # Geography / price / quality defines this cluster.
+            if geographic:
+                label_parts.append(geographic)
+            if price_label and abs(price_delta) >= 0.20:
+                label_parts.append(price_label)
+            elif rating_label and abs(rating_delta) >= 0.15:
+                label_parts.append(rating_label)
+            # Always aim for ≥ 2 parts — add price first, then rating as second
+            if len(label_parts) < 2 and price_label and price_label not in label_parts:
+                label_parts.append(price_label)
+            if len(label_parts) < 2 and rating_label and rating_label not in label_parts:
+                label_parts.append(rating_label)
+            if not label_parts:
+                label_parts = ["Neighborhood Mix"]
+
         label = " · ".join(label_parts[:3])
  
         # De-dupe clashing labels across clusters (happens when two clusters
         # look similar on our low-dimensional persona summary).
         if label in used_labels:
-            label = f"{label} · C{cluster_id}"
+            if top_cuisines:
+                top2 = " & ".join(name for name, _ in top_cuisines[:2])
+                label = f"{label} [{top2}]"
+            if label in used_labels:
+                label = f"{label} ({len(cluster_df)})"
         used_labels.add(label)
  
         # ---- Build a cuisine mix blurb ----
@@ -631,11 +686,13 @@ def build_feature_matrix(df: pd.DataFrame):
 
     # --- Categorical features (one-hot) ---
 
-    # 6. Cuisine one-hot (top 10 + Other)
+    # 6. Cuisine one-hot (6 broad groups + Other).
+    # Mapping raw cuisine_type strings to broad groups before encoding reduces
+    # the "Other" bucket from ~43% to ~7%, giving K-Means real cuisine signal.
     cuisine_series = df["cuisine_type"].fillna("Other").astype(str)
-    cuisine_group = cuisine_series.where(cuisine_series.isin(TOP_CUISINES), other="Other")
-    cuisine_dummies = pd.get_dummies(cuisine_group, prefix="cuisine").reindex(
-        columns=[f"cuisine_{c}" for c in TOP_CUISINES] + ["cuisine_Other"],
+    cuisine_mapped = cuisine_series.map(lambda x: CUISINE_GROUP_MAP.get(x, "Other"))
+    cuisine_dummies = pd.get_dummies(cuisine_mapped, prefix="cuisine").reindex(
+        columns=[f"cuisine_{g}" for g in CUISINE_GROUPS] + ["cuisine_Other"],
         fill_value=0,
     ).values.astype(np.float32)
 
@@ -663,7 +720,7 @@ def build_feature_matrix(df: pd.DataFrame):
 
     feature_columns = (
         ["price_norm", "rating_norm", "review_norm", "health_norm", "lat_norm", "lng_norm"]
-        + [f"cuisine_{c}" for c in TOP_CUISINES] + ["cuisine_Other"]
+        + [f"cuisine_{g}" for g in CUISINE_GROUPS] + ["cuisine_Other"]
         + [f"boro_{b}" for b in ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]]
     )
 
@@ -744,15 +801,101 @@ def _cluster_signature(df: pd.DataFrame, user_history: dict, k: int,
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+MAX_CLUSTER_FRACTION_THRESHOLD = 0.35  # Any single cluster > 35% is a degenerate catch-all
+
+
+def find_silhouette_knee(scores: list) -> int:
+    """First K at a local silhouette maximum with balanced clusters.
+
+    Two reasons to not use the global maximum:
+    1. Silhouette rising to the search boundary = "ran out of K values", not optimal.
+    2. A K that produces a single >35% catch-all cluster is degenerate regardless
+       of its silhouette score; we skip those as local-max candidates.
+
+    The first balanced local maximum is the genuine "elbow" where adding more
+    clusters stops producing meaningfully tighter, more balanced groups.
+    """
+    ks    = [s["k"]                              for s in scores]
+    sils  = [s["silhouette"]                     for s in scores]
+    fracs = [s.get("max_cluster_fraction", 0.0)  for s in scores]
+
+    if len(ks) <= 2:
+        return ks[int(np.argmax(sils))]
+
+    # Pass 1: first strict local max that also has balanced clusters
+    for i in range(1, len(ks) - 1):
+        if (sils[i] > sils[i - 1] and sils[i] > sils[i + 1]
+                and fracs[i] <= MAX_CLUSTER_FRACTION_THRESHOLD):
+            return ks[i]
+
+    # Pass 2: no balanced local max → use 80%-gain threshold among balanced K values
+    balanced = [(k, s) for k, s, f in zip(ks, sils, fracs)
+                if f <= MAX_CLUSTER_FRACTION_THRESHOLD]
+    if balanced:
+        b_ks, b_sils = zip(*balanced)
+        total_gain = max(b_sils) - b_sils[0]
+        if total_gain > 0:
+            target = b_sils[0] + 0.80 * total_gain
+            for k, s in zip(b_ks, b_sils):
+                if s >= target:
+                    return k
+        return b_ks[int(np.argmax(b_sils))]
+
+    # Pass 3: all candidates are unbalanced — fall back to raw first local max
+    for i in range(1, len(ks) - 1):
+        if sils[i] > sils[i - 1] and sils[i] > sils[i + 1]:
+            return ks[i]
+    return ks[int(np.argmax(sils))]
+
+
+def find_inertia_elbow(scores: list) -> int | None:
+    """First K where the per-step inertia drop falls below 15% of the largest step.
+
+    The 15% threshold marks the point of diminishing returns on the elbow curve:
+    before it, each additional cluster reduces WCSS substantially; after it,
+    the gains are small and the model is over-splitting the data.
+    Returns None when inertia data is unavailable (GMM / Agglomerative).
+    """
+    valid = [(s["k"], s["inertia"]) for s in scores if s.get("inertia") is not None]
+    if len(valid) < 3:
+        return None
+    ks       = [v[0] for v in valid]
+    inertias = [v[1] for v in valid]
+    steps    = [inertias[i] - inertias[i + 1] for i in range(len(inertias) - 1)]
+    if not steps:
+        return None
+    threshold = max(steps) * 0.15
+    for i, step in enumerate(steps):
+        if step < threshold:
+            return ks[i]   # K just before the improvement dropped below threshold
+    return ks[-1]
+
+
 def find_optimal_k(X_scaled: np.ndarray, k_range=range(4, 16),
-                   algorithm: str = "kmeans") -> int:
-    best_k, best_score = 8, -1
+                   algorithm: str = "kmeans",
+                   return_scores: bool = False):
+    """Find a principled K using elbow + silhouette-knee methods.
+
+    Selection logic (avoids the "boundary trap" of argmax-silhouette):
+    - **Silhouette knee**: first local max in the silhouette curve, or the K
+      that captures 80% of total silhouette gain — whichever comes first.
+    - **Inertia elbow** (K-Means only): first K where per-step WCSS improvement
+      drops below 15% of the largest observed step.
+    - Final K = min(k_sil_knee, k_inertia_elbow) so that both signals agree.
+
+    When ``return_scores=True`` returns ``(best_k, scores)`` where ``scores``
+    is a list of dicts with keys ``k``, ``silhouette``, ``inertia``.
+    Otherwise returns just ``best_k`` (backward-compatible default).
+    """
+    all_scores: list[dict] = []
     for k in k_range:
         if k >= len(X_scaled):
             break
+        inertia = None
         if algorithm == "kmeans":
             model = KMeansScratch(n_clusters=k, n_init=6, max_iter=200, random_state=42)
             labels = model.fit_predict(X_scaled)
+            inertia = float(model.inertia_)
         elif algorithm == "gmm":
             model = GaussianMixture(
                 n_components=k,
@@ -771,8 +914,26 @@ def find_optimal_k(X_scaled: np.ndarray, k_range=range(4, 16),
         if len(set(labels)) < 2:
             continue
         score = silhouette_score(X_scaled, labels, sample_size=min(1000, len(X_scaled)), random_state=42)
-        if score > best_score:
-            best_score, best_k = score, k
+        counts = np.bincount(labels.astype(int))
+        max_frac = float(counts.max()) / len(X_scaled)
+        all_scores.append({
+            "k": k,
+            "silhouette": float(score),
+            "inertia": inertia,
+            "max_cluster_fraction": max_frac,
+        })
+
+    if not all_scores:
+        return (8, []) if return_scores else 8
+
+    k_sil   = find_silhouette_knee(all_scores)
+    k_elbow = find_inertia_elbow(all_scores) if algorithm == "kmeans" else None
+    best_k  = min(k_sil, k_elbow) if k_elbow is not None else k_sil
+    valid_ks = [s["k"] for s in all_scores]
+    best_k = max(min(best_k, max(valid_ks)), min(valid_ks))
+
+    if return_scores:
+        return best_k, all_scores
     return best_k
 
 
@@ -839,11 +1000,11 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
         kmeans = best_model
     df["cluster_id"] = best_labels
 
-    # Merge undersized clusters (< 3% of total) into the nearest larger cluster
-    # by centroid distance. Prevents tiny degenerate groups and "catch-all" patterns
-    # where one cluster absorbs everything that didn't fit elsewhere.
+    # Merge undersized clusters (< 1.5% of total) into the nearest larger cluster
+    # by centroid distance. Prevents truly degenerate micro-groups while keeping
+    # meaningful small clusters (e.g., 40+ restaurants in a niche cuisine/area).
     centroids = kmeans.cluster_centers_
-    min_cluster_size = max(1, int(round(len(df) * 0.03)))
+    min_cluster_size = max(1, int(round(len(df) * 0.015)))
     while True:
         cluster_sizes = df["cluster_id"].value_counts()
         small_cluster_ids = cluster_sizes[cluster_sizes < min_cluster_size].index.tolist()
@@ -933,12 +1094,12 @@ def run_kmeans(df: pd.DataFrame, user_history: dict, k: int = 10):
 # ---------------------------------------------------------------------------
 # Alternate clustering algorithms (GMM and Hierarchical / Ward)
 # Both reuse ``build_feature_matrix`` / ``apply_user_weights`` so they operate
-# in the same 22-dim interpretable space as K-Means.
+# in the same 18-dim interpretable space as K-Means.
 # ---------------------------------------------------------------------------
 
 
 def _merge_small_clusters(df: pd.DataFrame, centroids: np.ndarray,
-                           min_fraction: float = 0.03):
+                           min_fraction: float = 0.015):
     """Merge clusters smaller than ``min_fraction`` of the total into their
     nearest large cluster by centroid Euclidean distance.  Mutates ``df``.
     """
@@ -1063,7 +1224,7 @@ def run_gmm(df: pd.DataFrame, user_history: dict, k: int = 10):
     """Gaussian Mixture clustering with tied covariance.
 
     Tied covariance shares one covariance matrix across components, which
-    is a strong regulariser when feature dims (22) outnumber typical cluster
+    is a strong regulariser when feature dimensions outnumber typical cluster
     sizes and prevents the catch-all ``k=1`` collapse that full covariance
     sometimes produces on sparse one-hot features.
     """
@@ -1278,7 +1439,7 @@ def build_user_feature_vector(profile: dict, restaurant_df: pd.DataFrame) -> np.
     - Explicit favorite_cuisines override liked-cuisine averages so the user's
       stated preferences are never diluted.
     """
-    from utils.clustering import TOP_CUISINES, BOROUGH_LIST, BUDGET_TO_PRICE  # type: ignore
+    from utils.clustering import CUISINE_GROUPS, CUISINE_GROUP_MAP, BOROUGH_LIST, BUDGET_TO_PRICE  # type: ignore
 
     liked_restaurants = profile.get("likes", [])
     liked_ids = {str(l.get("restaurant_id", "")) for l in liked_restaurants
@@ -1327,35 +1488,29 @@ def build_user_feature_vector(profile: dict, restaurant_df: pd.DataFrame) -> np.
     lng_norm = ((avg_lng - lng_min) / (lng_max - lng_min)
                 if lng_max > lng_min else 0.5)
 
-    # --- Cuisine one-hot ---
-    # We encode *which* cuisines the user prefers as ones (0/1), not a
-    # normalized probability.  This matches the one-hot shape of a
-    # restaurant row, which is the key to making cosine similarity do the
-    # right thing.  If the user likes multiple cuisines, multiple dimensions
-    # are 1 — their taste is genuinely multi-modal and the recommender
-    # surfaces both.
-    cuisine_vec = np.zeros(len(TOP_CUISINES) + 1, dtype=np.float32)
+    # --- Cuisine group one-hot ---
+    # Map raw cuisine preferences to the same 6 CUISINE_GROUPS used in
+    # build_feature_matrix so the user vector lives in the same space as the
+    # restaurant matrix.  Multiple groups can be 1 (multi-modal taste).
+    cuisine_vec = np.zeros(len(CUISINE_GROUPS) + 1, dtype=np.float32)  # +1 for Other
+
+    def _cuisine_to_group_idx(c: str) -> int:
+        group = CUISINE_GROUP_MAP.get(c, "Other")
+        if group in CUISINE_GROUPS:
+            return CUISINE_GROUPS.index(group)
+        return len(CUISINE_GROUPS)  # Other slot
 
     # Explicit preferences take priority (they're what the user stated).
     for c in fav_cuisines:
-        if c in TOP_CUISINES:
-            cuisine_vec[TOP_CUISINES.index(c)] = 1.0
-        else:
-            cuisine_vec[-1] = 1.0  # Other
+        cuisine_vec[_cuisine_to_group_idx(c)] = 1.0
 
     # Likes add to the signal but only flip dimensions to 1 (never normalize).
     if len(liked_df) > 0:
         liked_cuisine_counts = liked_df["cuisine_type"].fillna("Other").value_counts()
-        # Require at least 2 likes (or ≥ 25% of all likes) before a cuisine
-        # from liked history gets an auto-preference.  This prevents a single
-        # outlier like from poisoning the user's taste vector.
         min_count = max(2, int(len(liked_df) * 0.25))
         for cuisine, count in liked_cuisine_counts.items():
             if count >= min_count:
-                if cuisine in TOP_CUISINES:
-                    cuisine_vec[TOP_CUISINES.index(cuisine)] = 1.0
-                else:
-                    cuisine_vec[-1] = 1.0  # Other
+                cuisine_vec[_cuisine_to_group_idx(str(cuisine))] = 1.0
 
     # --- Borough one-hot (same 0/1 treatment) ---
     boro_vec = np.zeros(len(BOROUGH_LIST), dtype=np.float32)
@@ -1426,11 +1581,10 @@ def recommend_knn(user_vector: np.ndarray,
 
 
 def _scaled_space(vectors: np.ndarray, scaler: StandardScaler | None):
-    """Apply the cluster scaler to 22-dim feature vectors.
+    """Apply the cluster scaler to feature vectors.
 
-    Supports both:
-    - current 22-dim clustering space
-    - legacy 23-dim [features + user_affinity] scaler artifacts
+    Current space: 18 dims (6 numerical + 7 cuisine groups + 5 borough).
+    Handles dimension mismatches from cached scalers trained on older schemas.
     """
     if vectors.ndim == 1:
         vectors = vectors.reshape(1, -1)
@@ -1594,18 +1748,6 @@ def recommend_per_liked_knn(
     result["primary_influencer"] = [_influencer_label(i) for i in top_indices]
     return result.reset_index(drop=True)
 
-    def _influencer_label(idx):
-        src = int(best_source[idx])
-        if src < 0:
-            return "Profile preferences"
-        if liked_metadata and src < len(liked_metadata):
-            meta = liked_metadata[src]
-            return str(meta.get("name") or meta.get("dba") or f"liked #{src + 1}")
-        return f"liked #{src + 1}"
-
-    result["primary_influencer"] = [_influencer_label(i) for i in top_indices]
-    return result.reset_index(drop=True)
-
 
 def apply_mmr(
     candidates_df: pd.DataFrame,
@@ -1624,7 +1766,7 @@ def apply_mmr(
 
     where ``relevance(r)`` comes from ``candidates_df[relevance_column]``
     (fallback: cosine similarity to ``user_vector``) and pairwise
-    similarities are cosine distances in the scaled 22-dim feature space.
+    similarities are cosine distances in the scaled 18-dim feature space.
 
     Returns the selected candidates in MMR order.
     """

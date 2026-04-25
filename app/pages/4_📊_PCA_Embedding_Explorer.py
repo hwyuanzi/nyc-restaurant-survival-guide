@@ -417,8 +417,17 @@ if _feature_cols and pca_model is not None and pca_model.components_ is not None
 # ── Explained variance bar ────────────────────────────────────────────────────
 if st.session_state["pca_model"] is not None:
     st.markdown("---")
-    st.subheader("Variance Explained by Each Principal Component")
+    st.subheader("Variance Explained by Each Principal Component (Visualization)")
     pca_model = st.session_state["pca_model"]
+    _vis_var_total = sum(pca_model.explained_variance_ratio_[:3]) * 100
+    st.caption(
+        f"These 3 components (used for the 3D scatter above) capture "
+        f"**{_vis_var_total:.1f}%** of the variance in the scaled feature space. "
+        f"The **clustering** itself runs in a higher-dimensional PCA subspace "
+        f"(up to 24 components, retaining ≥ 92% variance) before K-Means assigns "
+        f"labels — so the 3D view is an approximate projection, not the full "
+        f"clustering space."
+    )
     var_df = pd.DataFrame({
         "Component": [f"PC{idx + 1}" for idx in range(3)],
         "Variance Explained (%)": [round(v * 100, 2) for v in pca_model.explained_variance_ratio_],

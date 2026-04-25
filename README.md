@@ -41,7 +41,7 @@ Built with **PyTorch**, **Streamlit**, **Plotly**, **pydeck**, and **HuggingFace
 |---|---|
 | 🔍 **Semantic Search** | Type what you want ("cozy Italian pasta spot in Brooklyn") and get ranked restaurant matches from a prepared dataset of ~2,835 real NYC restaurants enriched with Google Places data. |
 | 🧪 **Health Grade Risk Classifier** | Pick a held-out NYC restaurant and estimate whether its inspection profile looks more like Grade A, B, or C restaurants. The page shows probabilities as risk signals, compares the MLP to an always-A baseline, and explains why score-derived leakage features were removed. |
-| 📍 **Restaurant Cluster GIS Map** | Cluster the ~2,835 restaurants with three comparable algorithms (K-Means from scratch, Gaussian Mixture, Ward) in a 22-dim interpretable feature space (price / rating / review volume / health / cuisine / borough / geo-location). Restaurants are colored by cluster on a real NYC map with persona labels + narrative stories. |
+| 📍 **Restaurant Cluster GIS Map** | Cluster the ~2,835 restaurants with three comparable algorithms (K-Means from scratch, Gaussian Mixture, Ward) in an 18-dim interpretable feature space (price / rating / review volume / health / cuisine group / borough / geo-location). Restaurants are colored by cluster on a real NYC map with persona labels + narrative stories. |
 | 📊 **PCA Embedding Explorer** | Projects the same clusters into 3-D PCA space with feature-loading bar charts, cluster-distance heatmap, and prototype restaurants nearest each centroid. |
 | 🔮 **Personalized Recommendations** | Given your saved profile and liked restaurants, ranks candidates by per-liked cosine KNN fused via Reciprocal Rank Fusion, re-ranked with Maximal Marginal Relevance for cuisine diversity, and a cuisine-alignment multiplier so users see their preferred cuisines first. |
 
@@ -138,17 +138,19 @@ Input (25-D)
 
 2. **E-step (Assignment):** For each restaurant, compute Euclidean distance to all centroids and assign it to the nearest one. Fully vectorized with NumPy broadcasting.
 
-3. **M-step (Update):** Recompute each centroid as the mean of all points assigned to it. Small clusters below a minimum size threshold are merged into their nearest neighbor to avoid degenerate singletons.
+3. **M-step (Update):** Recompute each centroid as the mean of all points assigned to it. Micro-clusters below 1.5% of the dataset are merged into their nearest larger neighbor to avoid degenerate singletons while preserving meaningful smaller groups.
 
 4. **Convergence:** Iterate until the maximum centroid shift falls below `tol = 1e-4` or `max_iter` is reached.
 
 5. **Multi-start:** Run `n_init` times with different seeds; retain the run with lowest inertia (sum of squared distances to assigned centroids).
 
-6. **Quality:** Silhouette score computed post-fit using `sklearn.metrics.silhouette_score` to assess cluster cohesion and separation.
+6. **Quality / K selection:** The app sweeps `K=4..15` and records silhouette, inertia, and largest-cluster share. It chooses a conservative K from the silhouette knee and K-Means inertia elbow while skipping catch-all candidates where one cluster exceeds 35% of the dataset.
 
-**Feature space (22-D):** standardized price tier, Google rating, log(review volume), DOHMH health score, latitude, longitude + cuisine one-hot (top-10 + Other = 11 features) + borough one-hot (5 features). All features are interpretable — no learned embeddings — so cluster persona labels can be read directly from centroid coordinates.
+**Feature space (18-D):** standardized price tier, Google rating, log(review volume), DOHMH health score, latitude, longitude + cuisine-group one-hot (American, Asian, Latin, Cafe, Italian, European, Other = 7 features) + borough one-hot (5 features). Raw cuisine strings are mapped into these broader groups before clustering, which reduces the old "Other" catch-all from roughly 43% to about 7% and prevents one giant mixed cluster from absorbing the dataset.
 
-**Cluster labeling:** Each cluster gets a three-slot persona label combining dominant cuisine type, borough concentration, and a rating-review persona (*Hidden Gem / Tourist Favorite / Reliable / Under-the-Radar / Overhyped*) or price tier (*Budget / Mid-Range / Upscale / Luxury*). Cuisine-agnostic clusters are labeled "Mixed Cuisine" with a narrative explaining which binding signal (price, rating, or location) unites them.
+**Cluster labeling:** K-Means only assigns numeric `cluster_id`s. The app names each cluster afterward from summary statistics in the same grouped feature space: a dominant cuisine group leads the label when present; otherwise borough concentration, price tier, and rating-review persona explain what binds the cluster. This is why labels such as `American`, `Asian`, `Cafe`, `European · Mid-Range`, `Staten Island · Mid-Range`, and `Mid-Range · Highly Rated` are interpretations of the learned clusters, not manual assignments.
+
+**Current default result:** On the prepared ~2,835-restaurant sample, the K-selection sweep chooses requested `K = 9`; one micro-cluster is merged by the 1.5% stability rule, leaving 8 displayed clusters. The largest cluster is about 27% of restaurants, below the 35% catch-all threshold.
 
 ---
 
@@ -169,7 +171,7 @@ Decoder: FC(2 → 32) → ReLU → FC(32 → 64) → ReLU → FC(64 → 6)
 
 #### PCA — Cluster Projection (`models/pca_scratch.py`)
 
-Applied in the PCA Embedding Explorer to project the 22-D clustering feature space into 3 principal components for visualization. Feature loading bar charts show which original features (price, rating, health score, borough, etc.) explain the most variance per principal component, giving interpretable axes to the scatter plot.
+Applied in the PCA Embedding Explorer to project the 18-D clustering feature space into 3 principal components for visualization. Feature loading bar charts show which original features (price, rating, health score, cuisine group, borough, etc.) explain the most variance per principal component, giving interpretable axes to the scatter plot.
 
 ---
 
@@ -188,7 +190,7 @@ Applied in the PCA Embedding Explorer to project the 22-D clustering feature spa
 
 **How it works:**
 
-1. **Per-liked KNN retrieval:** For each restaurant the user has liked, compute cosine similarity to all candidates in the 22-D feature space. This produces one ranked list per liked restaurant.
+1. **Per-liked KNN retrieval:** For each restaurant the user has liked, compute cosine similarity to all candidates in the 18-D feature space. This produces one ranked list per liked restaurant.
 
 2. **Reciprocal Rank Fusion (RRF):** The per-liked ranked lists are merged using RRF (Cormack et al. 2009): each candidate's final score is the sum of `1 / (k + rank_i)` across all lists. A small profile-similarity bias term derived from the user's survey answers is added.
 

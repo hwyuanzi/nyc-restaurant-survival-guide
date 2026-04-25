@@ -5,9 +5,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from app.ui_utils import apply_apple_theme
-from utils.clustering import get_clustered_data, find_optimal_k, compute_silhouette
+from utils.clustering import (
+    get_clustered_data, find_optimal_k, compute_silhouette,
+    find_silhouette_knee, find_inertia_elbow,
+)
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
 from utils.user_profile import init_session_state, predict_user_cluster
 
@@ -97,14 +102,17 @@ with st.sidebar:
     k = st.slider("Number of Clusters (K)", 4, 16, st.session_state["optimal_k"])
     cluster_filter_placeholder = st.empty()
 
-    if st.button("🔍 Find Optimal K"):
-        with st.spinner("Computing silhouette scores..."):
+    if st.button("🔍 Find Optimal K (K=4…15)"):
+        with st.spinner("Sweeping K=4…15, computing silhouette + inertia…"):
             from utils.clustering import build_feature_matrix, prepare_clustering_space
             X, _, _ = build_feature_matrix(raw_df)
             _, X_cluster, _ = prepare_clustering_space(X, fit=True)
-            best_k  = find_optimal_k(X_cluster, algorithm=algorithm)
+            best_k, k_scores = find_optimal_k(
+                X_cluster, algorithm=algorithm, return_scores=True
+            )
             st.session_state["optimal_k"] = best_k
-            st.success(f"Optimal K for {algo_label} = {best_k}")
+            st.session_state["k_selection_scores"] = k_scores
+            st.session_state["k_selection_algo"] = algorithm
             k = best_k
 
     if st.button("🔄 Re-run Clustering"):
@@ -138,6 +146,15 @@ with st.spinner(f"Running {algo_display}..."):
 predicted_cluster = predict_user_cluster(user_history, cdf, kmeans, scaler)
 st.session_state["predicted_cluster"] = predicted_cluster
 
+# ── Effective cluster count note ─────────────────────────────────────────────
+_n_effective = cdf["cluster_id"].nunique()
+if _n_effective < k:
+    st.info(
+        f"ℹ️ Requested K = {k}, effective clusters = **{_n_effective}** "
+        f"({k - _n_effective} cluster(s) with < 1.5% of restaurants were merged "
+        f"into their nearest neighbour to prevent degenerate micro-groups)."
+    )
+
 # ── User cluster banner ───────────────────────────────────────────────────────
 if predicted_cluster != -1:
     cl_label = cdf[cdf["cluster_id"] == predicted_cluster]["cluster_label"].iloc[0]
@@ -150,7 +167,8 @@ with st.expander("🔬 Compare clustering algorithms on this dataset"):
         "Silhouette score measures how tight clusters are (higher = better, "
         "−1 to 1).  Label diversity is a rough interpretability proxy — the "
         "top 3 auto-generated cluster labels by restaurant count.  All three "
-        "algorithms cluster the same 22-dim interpretable feature space."
+        "algorithms cluster the same 18-dim interpretable feature space "
+        "(6 numeric signals + 7 cuisine-group indicators + 5 borough indicators)."
     )
     run_compare = st.button("Run comparison (≈30s–1min)")
     if run_compare:
@@ -183,6 +201,142 @@ with st.expander("🔬 Compare clustering algorithms on this dataset"):
         best = df_cmp.loc[df_cmp["Silhouette"].idxmax(), "Algorithm"] if not df_cmp["Silhouette"].isna().all() else None
         if best:
             st.caption(f"Best by silhouette on K={k}: **{best}**")
+
+# ── K-selection analysis (shown after "Find Optimal K" is clicked) ────────────
+_k_scores = st.session_state.get("k_selection_scores")
+if _k_scores:
+    _k_algo = st.session_state.get("k_selection_algo", algorithm)
+    _best_k = st.session_state["optimal_k"]
+    _k_sil_knee  = find_silhouette_knee(_k_scores)
+    _k_elbow     = find_inertia_elbow(_k_scores)
+
+    with st.expander("📐 K Selection Analysis — Elbow & Silhouette", expanded=True):
+        st.caption(
+            "**How we choose K (two independent signals):** \n\n"
+            "① **Silhouette knee** — first local maximum in the silhouette curve "
+            "**where no single cluster exceeds 35% of the dataset** (red dots = "
+            "degenerate catch-all; skipped as candidates). We avoid the global maximum "
+            "because silhouette rises when K is too small and one cluster absorbs half "
+            "the restaurants — that is not good clustering, just artificial tightness.\n\n"
+            "② **Inertia elbow** (K-Means only) — first K where the per-step WCSS "
+            "improvement drops below 15% of the largest single-step improvement. "
+            "This marks the 'diminishing returns' knee in the elbow curve.\n\n"
+            "**Final K = min(silhouette knee, inertia elbow)** — the more conservative "
+            "estimate. 🟡 gold = chosen K · 🟢 green = silhouette knee · "
+            "🔴 red = catch-all cluster (> 35%, skipped) · 🔵 blue = normal."
+        )
+        _ks    = [r["k"] for r in _k_scores]
+        _sils  = [r["silhouette"] for r in _k_scores]
+        _inerts = [r["inertia"] for r in _k_scores]
+        _fracs  = [r.get("max_cluster_fraction", 0.0) for r in _k_scores]
+        has_inertia = any(v is not None for v in _inerts)
+
+        from utils.clustering import MAX_CLUSTER_FRACTION_THRESHOLD
+        # Highlight dots: chosen=gold, knee=green, balance-fail=red, else blue
+        _sil_colors = []
+        for k_, frac in zip(_ks, _fracs):
+            if k_ == _best_k:
+                _sil_colors.append("#facc15")    # gold = final chosen
+            elif k_ == _k_sil_knee:
+                _sil_colors.append("#4ade80")    # green = silhouette knee
+            elif frac > MAX_CLUSTER_FRACTION_THRESHOLD:
+                _sil_colors.append("#f87171")    # red = catch-all cluster (degenerate)
+            else:
+                _sil_colors.append("#6c8fff")    # blue = normal
+
+        if has_inertia:
+            _fig = make_subplots(
+                rows=1, cols=2,
+                subplot_titles=[
+                    "① Silhouette Score (↑ better) — pick the first local max",
+                    "② Inertia / WCSS (↓ better) — pick the elbow",
+                ],
+            )
+        else:
+            _fig = make_subplots(
+                rows=1, cols=1,
+                subplot_titles=["① Silhouette Score (↑ better) — pick the first local max"],
+            )
+
+        _fig.add_trace(go.Scatter(
+            x=_ks, y=_sils, mode="lines+markers",
+            name="Silhouette",
+            line=dict(color="#6c8fff", width=2),
+            marker=dict(size=9, color=_sil_colors),
+            hovertemplate="K=%{x}<br>Silhouette=%{y:.4f}<extra></extra>",
+        ), row=1, col=1)
+        # Annotation: silhouette knee
+        if _k_sil_knee in _ks:
+            _sil_val = _sils[_ks.index(_k_sil_knee)]
+            _fig.add_annotation(
+                x=_k_sil_knee, y=_sil_val, text=f"Knee K={_k_sil_knee}",
+                showarrow=True, arrowhead=2, ax=30, ay=-30,
+                font=dict(color="#4ade80", size=11), row=1, col=1,
+            )
+        # Annotation: chosen
+        _fig.add_vline(x=_best_k, line_dash="dot", line_color="#facc15",
+                       annotation_text=f"Chosen K={_best_k}",
+                       annotation_font_color="#facc15", row=1, col=1)
+
+        if has_inertia:
+            _inert_colors = [
+                "#facc15" if k_ == _best_k else
+                "#fb923c" if k_ == _k_elbow else
+                "#ff9f43"
+                for k_ in _ks
+            ]
+            _fig.add_trace(go.Scatter(
+                x=_ks, y=_inerts, mode="lines+markers",
+                name="Inertia",
+                line=dict(color="#ff9f43", width=2),
+                marker=dict(size=9, color=_inert_colors),
+                hovertemplate="K=%{x}<br>Inertia=%{y:,.0f}<extra></extra>",
+            ), row=1, col=2)
+            if _k_elbow is not None and _k_elbow in _ks:
+                _iert_val = _inerts[_ks.index(_k_elbow)]
+                _fig.add_annotation(
+                    x=_k_elbow, y=_iert_val, text=f"Elbow K={_k_elbow}",
+                    showarrow=True, arrowhead=2, ax=30, ay=-30,
+                    font=dict(color="#fb923c", size=11), row=1, col=2,
+                )
+            _fig.add_vline(x=_best_k, line_dash="dot", line_color="#facc15",
+                           row=1, col=2)
+
+        _fig.update_layout(
+            height=340,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#e0e0f0"),
+            showlegend=False,
+            margin=dict(l=0, r=0, t=50, b=0),
+        )
+        for _axis in ["xaxis", "xaxis2"]:
+            _fig.update_layout(**{_axis: dict(
+                gridcolor="#2a2a38", title="K (number of clusters)", tickvals=_ks,
+            )})
+        for _axis in ["yaxis", "yaxis2"]:
+            _fig.update_layout(**{_axis: dict(gridcolor="#2a2a38")})
+        st.plotly_chart(_fig, use_container_width=True)
+
+        _algo_display = {
+            "kmeans": "K-Means (scratch NumPy)", "gmm": "GMM (tied covariance)",
+            "agglomerative": "Hierarchical Ward",
+        }.get(_k_algo, _k_algo)
+        _chosen_sil = _sils[_ks.index(_best_k)] if _best_k in _ks else float("nan")
+
+        if _k_elbow is not None:
+            st.success(
+                f"**Chosen K = {_best_k}** = min(silhouette knee K={_k_sil_knee}, "
+                f"inertia elbow K={_k_elbow}) for {_algo_display} "
+                f"on {len(raw_df):,} restaurants "
+                f"(silhouette at K={_best_k}: **{_chosen_sil:.4f}**)."
+            )
+        else:
+            st.success(
+                f"**Chosen K = {_best_k}** (silhouette knee) "
+                f"for {_algo_display} on {len(raw_df):,} restaurants "
+                f"(silhouette: **{_chosen_sil:.4f}**)."
+            )
 
 # ── Prepare map data ──────────────────────────────────────────────────────────
 map_df = cdf.dropna(subset=["lat", "lng"]).copy()

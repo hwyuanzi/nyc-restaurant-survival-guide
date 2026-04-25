@@ -391,7 +391,7 @@ def init_session_state():
         "selected_cluster_label": "All Clusters",
         "active_profile_id": None,
         "user_history": get_default_user_history(),
-        "optimal_k": 10,
+        "optimal_k": 9,
         "raw_df": None,
     }
     for key, value in defaults.items():
