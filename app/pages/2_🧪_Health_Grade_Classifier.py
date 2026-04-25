@@ -39,6 +39,7 @@ from sklearn.model_selection import train_test_split
  
 from app.ui_utils import apply_apple_theme
 from models.custom_mlp import CustomMLP, TrainingHistory, evaluate_mlp, train_mlp
+from models.pca_scratch import PCAScratch
 from utils.user_profile import init_session_state
  
  
@@ -197,56 +198,256 @@ def predict_grade(feature_row: np.ndarray):
         logits = model(torch.from_numpy(feature_row.astype(np.float32)).unsqueeze(0))
         probs = torch.softmax(logits, dim=1).numpy()[0]
     return probs
+
+
+FEATURE_INDEX = {name: idx for idx, name in enumerate(feature_cols)}
+NUMERIC_FEATURES = [c for c in feature_config.get("numerical_features", []) if c in feature_cols]
+SCALER_MEAN = dict(zip(feature_config.get("numerical_features", []),
+                       feature_config.get("scaler_mean", [])))
+SCALER_SCALE = dict(zip(feature_config.get("numerical_features", []),
+                        feature_config.get("scaler_scale", [])))
+BORO_COLS = [c for c in feature_cols if c.startswith("boro_")]
+CUISINE_COLS = [c for c in feature_cols if c.startswith("cuisine_")]
+ACTIONABLE_FEATURES = ["num_violations", "violations_per_inspection"]
+COUNT_FEATURES = {"num_inspections", "num_violations"}
+FEATURE_LABELS = {
+    "num_inspections": "Number of inspections",
+    "num_violations": "Total violations",
+    "violations_per_inspection": "Violations per inspection",
+}
+
+
+def _raw_value(feature_name: str, standardized_value: float) -> float:
+    """Convert a model-space standardized numeric feature back to app-friendly units."""
+    return float(standardized_value * SCALER_SCALE[feature_name] + SCALER_MEAN[feature_name])
+
+
+def _standardized_value(feature_name: str, raw_value: float) -> float:
+    """Convert app-friendly raw units into the standardized value expected by the MLP."""
+    return float((raw_value - SCALER_MEAN[feature_name]) / SCALER_SCALE[feature_name])
+
+
+def _with_numeric_raw(feature_row: np.ndarray, feature_name: str, raw_value: float) -> np.ndarray:
+    edited = feature_row.copy()
+    edited[FEATURE_INDEX[feature_name]] = _standardized_value(feature_name, raw_value)
+    return edited
+
+
+def _active_one_hot(feature_row: np.ndarray, columns: list[str]) -> str | None:
+    if not columns:
+        return None
+    values = [feature_row[FEATURE_INDEX[c]] for c in columns]
+    return columns[int(np.argmax(values))]
+
+
+def _with_one_hot(feature_row: np.ndarray, columns: list[str], active_column: str) -> np.ndarray:
+    edited = feature_row.copy()
+    for col in columns:
+        edited[FEATURE_INDEX[col]] = 1.0 if col == active_column else 0.0
+    return edited
+
+
+def _display_category(col_name: str, prefix: str) -> str:
+    label = col_name.replace(prefix, "")
+    return "Unknown" if label == "0" else label
+
+
+@st.cache_data(show_spinner=False)
+def get_numeric_raw_ranges():
+    """Realistic slider bounds from the 1st-99th percentiles of prepared data."""
+    combined = pd.concat([train_df[feature_cols], test_df[feature_cols]], axis=0)
+    ranges = {}
+    for col in NUMERIC_FEATURES:
+        raw_values = combined[col].astype(float).map(lambda v: _raw_value(col, v)).to_numpy()
+        lo = float(np.nanpercentile(raw_values, 1))
+        hi = float(np.nanpercentile(raw_values, 99))
+        if col in COUNT_FEATURES:
+            lo = float(np.floor(lo))
+            hi = float(np.ceil(hi))
+        ranges[col] = {
+            "min": max(0.0, lo),
+            "max": max(0.0, hi),
+            "median_a": float(np.nanmedian(
+                train_df.loc[train_df["target"] == 0, col].astype(float).map(lambda v: _raw_value(col, v))
+            )),
+        }
+    return ranges
+
+
+def _slider_step(feature_name: str, min_value: float, max_value: float) -> float:
+    if feature_name in COUNT_FEATURES:
+        return 1
+    span = max(max_value - min_value, 1.0)
+    if span <= 10:
+        return 0.1
+    if span <= 50:
+        return 0.5
+    return 1.0
+
+
+def _grade_from_probs(probs: np.ndarray) -> str:
+    return GRADE_NAMES[int(np.argmax(probs))]
+
+
+def _format_raw_feature(feature_name: str, value: float) -> str:
+    if feature_name in COUNT_FEATURES:
+        return f"{int(round(value))}"
+    return f"{value:.2f}"
+
+
+def _probability_delta_rows(before: np.ndarray, after: np.ndarray) -> pd.DataFrame:
+    return pd.DataFrame({
+        "Grade": [f"Grade {g}" for g in GRADE_NAMES],
+        "Original": before,
+        "Edited": after,
+    })
+
+
+@st.cache_data(show_spinner=False)
+def compute_pca_context():
+    """Project the held-out feature vectors with our NumPy PCA implementation."""
+    X_test = test_df[feature_cols].values.astype(np.float64)
+    pca = PCAScratch(n_components=2)
+    coords = pca.fit_transform(X_test)
+    return {
+        "coords": coords,
+        "mean": pca.mean_,
+        "components": pca.components_,
+        "explained": pca.explained_variance_ratio_,
+    }
+
+
+def transform_with_cached_pca(feature_matrix: np.ndarray, pca_payload: dict) -> np.ndarray:
+    return (np.asarray(feature_matrix, dtype=np.float64) - pca_payload["mean"]) @ pca_payload["components"].T
+
+
+def local_sensitivity(feature_row: np.ndarray) -> pd.DataFrame:
+    """Rank numeric features by how much moving toward the Grade-A median changes P(A)."""
+    base_probs = predict_grade(feature_row)
+    ranges = get_numeric_raw_ranges()
+    rows = []
+    for col in NUMERIC_FEATURES:
+        current_raw = _raw_value(col, feature_row[FEATURE_INDEX[col]])
+        target_raw = ranges[col]["median_a"]
+        edited = _with_numeric_raw(feature_row, col, target_raw)
+        edited_probs = predict_grade(edited)
+        rows.append({
+            "Feature": col,
+            "Current": current_raw,
+            "Reference": target_raw,
+            "Delta P(A)": float(edited_probs[0] - base_probs[0]),
+            "Actionable": "Yes" if col in ACTIONABLE_FEATURES else "Context",
+        })
+    return pd.DataFrame(rows).sort_values("Delta P(A)", ascending=False)
+
+
+def find_path_to_a(feature_row: np.ndarray):
+    """Search for a realistic A-path by lowering violation rate while holding history fixed."""
+    if not all(col in FEATURE_INDEX for col in ACTIONABLE_FEATURES + ["num_inspections"]):
+        return None
+
+    inspections = max(_raw_value("num_inspections", feature_row[FEATURE_INDEX["num_inspections"]]), 1.0)
+    current_vpi = max(_raw_value("violations_per_inspection",
+                                 feature_row[FEATURE_INDEX["violations_per_inspection"]]), 0.0)
+    current_total = max(_raw_value("num_violations",
+                                   feature_row[FEATURE_INDEX["num_violations"]]), 0.0)
+
+    best = None
+    for candidate_vpi in np.linspace(current_vpi, 0.0, 80):
+        candidate_total = float(np.floor(min(current_total, candidate_vpi * inspections)))
+        edited = _with_numeric_raw(feature_row, "violations_per_inspection", candidate_vpi)
+        edited = _with_numeric_raw(edited, "num_violations", candidate_total)
+        probs = predict_grade(edited)
+        if _grade_from_probs(probs) == "A":
+            best = {
+                "feature_row": edited,
+                "probs": probs,
+                "violations_per_inspection": candidate_vpi,
+                "num_violations": candidate_total,
+            }
+            break
+
+    if best is not None:
+        return best
+
+    # Fallback: show the best P(A) improvement even if the decision boundary is not crossed.
+    candidate_vpi = 0.0
+    candidate_total = 0.0
+    edited = _with_numeric_raw(feature_row, "violations_per_inspection", candidate_vpi)
+    edited = _with_numeric_raw(edited, "num_violations", candidate_total)
+    return {
+        "feature_row": edited,
+        "probs": predict_grade(edited),
+        "violations_per_inspection": candidate_vpi,
+        "num_violations": candidate_total,
+        "fallback": True,
+    }
  
  
 # ---------------------------------------------------------------------------
-# Permutation importance — cached because it takes ~3 seconds
+# Permutation importance — cached because it takes a few seconds
 # ---------------------------------------------------------------------------
  
 @st.cache_data(show_spinner="Computing permutation importance...")
-def compute_permutation_importance(n_repeats: int = 3):
-    """For each feature, shuffle its values across the test set and measure
-    how much accuracy drops.  Bigger drop = feature is more important to the
-    trained model's predictions.
- 
-    Cached on disk between runs so it's instant after the first compute.
+def compute_permutation_importance(n_repeats: int = 8):
+    """Shuffle feature groups and measure weighted-F1 drop.
+
+    Numeric features are shuffled one at a time.  One-hot categories are
+    shuffled as groups so the perturbed rows still contain a valid borough or
+    cuisine vector.  Weighted F1 is used instead of raw accuracy because the
+    grade distribution is strongly imbalanced toward A.
     """
+    metric_version = "weighted_f1_group_v2"
     if IMPORTANCE_CACHE_PATH.exists():
         try:
             with open(IMPORTANCE_CACHE_PATH) as f:
                 payload = json.load(f)
-            if payload.get("feature_cols") == feature_cols:
-                return payload["baseline"], payload["importance"]
+            if payload.get("feature_cols") == feature_cols and payload.get("metric_version") == metric_version:
+                return payload["baseline"], payload["importance"], payload["metric_name"]
         except Exception:
             pass
- 
+
     X_test = tensors["X_test"].numpy()
-    y_test = tensors["y_test"].numpy()
- 
-    def accuracy(X):
-        with torch.no_grad():
-            preds = model(torch.from_numpy(X.astype(np.float32))).argmax(dim=1).numpy()
-        return float((preds == y_test).mean())
- 
-    baseline = accuracy(X_test)
+
+    def weighted_f1(X):
+        score, _ = evaluate_mlp(model, torch.from_numpy(X.astype(np.float32)), tensors["y_test"])
+        return float(score)
+
+    baseline = weighted_f1(X_test)
+    groups = []
+    for col in NUMERIC_FEATURES:
+        groups.append((FEATURE_LABELS.get(col, col), [FEATURE_INDEX[col]]))
+    if BORO_COLS:
+        groups.append(("Borough one-hot group", [FEATURE_INDEX[c] for c in BORO_COLS]))
+    if CUISINE_COLS:
+        groups.append(("Cuisine one-hot group", [FEATURE_INDEX[c] for c in CUISINE_COLS]))
+    if NUMERIC_FEATURES:
+        groups.append(("All inspection-pattern numerics", [FEATURE_INDEX[c] for c in NUMERIC_FEATURES]))
+
     importance = {}
     rng = np.random.default_rng(42)
-    for i, col in enumerate(feature_cols):
+    for name, indices in groups:
         drops = []
         for _ in range(n_repeats):
             X_perm = X_test.copy()
             perm = rng.permutation(len(X_perm))
-            X_perm[:, i] = X_test[perm, i]
-            drops.append(baseline - accuracy(X_perm))
-        importance[col] = float(np.mean(drops))
- 
-    payload = {"feature_cols": feature_cols, "baseline": baseline, "importance": importance}
+            X_perm[:, indices] = X_test[perm][:, indices]
+            drops.append(baseline - weighted_f1(X_perm))
+        importance[name] = float(np.mean(drops))
+
+    payload = {
+        "metric_version": metric_version,
+        "metric_name": "weighted F1",
+        "feature_cols": feature_cols,
+        "baseline": baseline,
+        "importance": importance,
+    }
     try:
         with open(IMPORTANCE_CACHE_PATH, "w") as f:
             json.dump(payload, f)
     except Exception:
         pass
-    return baseline, importance
+    return baseline, importance, "weighted F1"
  
  
 # ---------------------------------------------------------------------------
@@ -256,7 +457,7 @@ def compute_permutation_importance(n_repeats: int = 3):
 st.info(
     f"**Model:** 3-layer MLP ({input_dim} → 128 → 128 → 3), trained on "
     f"{len(train_df):,} NYC restaurants with held-out test set of "
-    f"{len(test_df):,}.  Class-weighted CrossEntropy loss, Adam optimizer, "
+    f"{len(test_df):,}.  Class-weighted CrossEntropy loss, AdamW optimizer, "
     f"early stopping on validation F1.  Best val F1: "
     f"{training_history.best_val_f1*100:.1f}% at epoch "
     f"{training_history.best_epoch+1}.",
@@ -431,6 +632,262 @@ with col_chart:
         font_family="Inter, -apple-system, sans-serif",
     )
     st.plotly_chart(prob_fig, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# Section 3 — What-if explorer + actionable path to A
+# ---------------------------------------------------------------------------
+
+st.markdown("---")
+st.subheader("3️⃣ What-if Explorer")
+st.caption(
+    "Change the model inputs and watch the predicted grade update.  Numeric sliders "
+    "edit standardized MLP inputs after converting them back to readable inspection "
+    "units. Count features move in whole numbers; violation rate can be fractional. "
+    "Borough and cuisine selectors are for correlation exploration only."
+)
+
+raw_ranges = get_numeric_raw_ranges()
+edited_row = feature_row.copy()
+
+col_sliders, col_profile = st.columns([1.15, 0.85])
+
+with col_sliders:
+    st.markdown("**Actionable inspection pattern**")
+    for col in ACTIONABLE_FEATURES:
+        if col not in FEATURE_INDEX:
+            continue
+        current_raw = _raw_value(col, feature_row[FEATURE_INDEX[col]])
+        min_value = min(raw_ranges[col]["min"], current_raw)
+        max_value = max(raw_ranges[col]["max"], current_raw)
+        if col in COUNT_FEATURES:
+            slider_kwargs = {
+                "min_value": int(np.floor(min_value)),
+                "max_value": int(np.ceil(max_value)),
+                "value": int(round(current_raw)),
+                "step": 1,
+            }
+        else:
+            slider_kwargs = {
+                "min_value": float(min_value),
+                "max_value": float(max_value),
+                "value": float(current_raw),
+                "step": float(_slider_step(col, min_value, max_value)),
+            }
+        value = st.slider(
+            FEATURE_LABELS.get(col, col.replace("_", " ").title()),
+            **slider_kwargs,
+            help=(
+                "Range is clipped to the 1st-99th percentile of the prepared DOHMH "
+                "data so the demo avoids unrealistic outliers.  The model receives "
+                "a standardized version of this value."
+            ),
+        )
+        edited_row = _with_numeric_raw(edited_row, col, float(value))
+
+    if "num_inspections" in FEATURE_INDEX:
+        st.markdown("**Historical context**")
+        col = "num_inspections"
+        current_raw = _raw_value(col, feature_row[FEATURE_INDEX[col]])
+        min_value = min(raw_ranges[col]["min"], current_raw)
+        max_value = max(raw_ranges[col]["max"], current_raw)
+        value = st.slider(
+            FEATURE_LABELS.get(col, "Number of inspections"),
+            min_value=int(np.floor(min_value)),
+            max_value=int(np.ceil(max_value)),
+            value=int(round(current_raw)),
+            step=1,
+            help=(
+                "This is context, not a direct improvement lever.  A restaurant cannot "
+                "erase inspection history, but changing it shows how exposure affects the model. "
+                "Range is clipped to the 1st-99th percentile of the prepared data."
+            ),
+        )
+        edited_row = _with_numeric_raw(edited_row, col, float(value))
+
+with col_profile:
+    st.markdown("**Profile selectors**")
+    active_boro = _active_one_hot(feature_row, BORO_COLS)
+    if active_boro is not None:
+        selected_boro_col = st.selectbox(
+            "Borough",
+            BORO_COLS,
+            index=BORO_COLS.index(active_boro),
+            format_func=lambda c: _display_category(c, "boro_"),
+            help="Exploratory only. Borough is a context feature, not an action recommendation.",
+        )
+        edited_row = _with_one_hot(edited_row, BORO_COLS, selected_boro_col)
+
+    active_cuisine = _active_one_hot(feature_row, CUISINE_COLS)
+    if active_cuisine is not None:
+        selected_cuisine_col = st.selectbox(
+            "Cuisine Group",
+            CUISINE_COLS,
+            index=CUISINE_COLS.index(active_cuisine),
+            format_func=lambda c: _display_category(c, "cuisine_"),
+            help="Exploratory only. Cuisine captures group-level correlation, not a direct health intervention.",
+        )
+        edited_row = _with_one_hot(edited_row, CUISINE_COLS, selected_cuisine_col)
+
+    st.info(
+        "Use the sliders for realistic operational changes.  Use selectors to inspect "
+        "dataset correlations, not as business advice.",
+        icon="ℹ️",
+    )
+
+edited_probs = predict_grade(edited_row)
+edited_grade = _grade_from_probs(edited_probs)
+pa_delta = edited_probs[0] - probs[0]
+
+col_before_after, col_delta = st.columns([1.2, 0.8])
+
+with col_before_after:
+    before_after = _probability_delta_rows(probs, edited_probs)
+    compare_fig = go.Figure()
+    compare_fig.add_trace(go.Bar(
+        x=before_after["Grade"], y=before_after["Original"],
+        name="Original", marker_color="#8E8E93",
+        text=[f"{v * 100:.1f}%" for v in before_after["Original"]],
+        textposition="outside",
+    ))
+    compare_fig.add_trace(go.Bar(
+        x=before_after["Grade"], y=before_after["Edited"],
+        name="Edited", marker_color=[GRADE_COLORS[g] for g in GRADE_NAMES],
+        text=[f"{v * 100:.1f}%" for v in before_after["Edited"]],
+        textposition="outside",
+    ))
+    compare_fig.update_layout(
+        title="Original vs edited class probabilities",
+        barmode="group", yaxis=dict(range=[0, 1.1], title="P(grade)"),
+        height=340, margin=dict(l=20, r=20, t=50, b=20),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font_family="Inter, -apple-system, sans-serif",
+    )
+    st.plotly_chart(compare_fig, use_container_width=True)
+
+with col_delta:
+    st.metric("Edited Prediction", edited_grade, delta=f"from {pred_grade}")
+    st.metric("P(A) Change", f"{pa_delta * 100:+.1f} pts")
+    if edited_grade != pred_grade:
+        st.success(f"The edited profile crosses the decision boundary: {pred_grade} → {edited_grade}.")
+    else:
+        st.caption("The probabilities changed, but the top predicted grade did not switch.")
+
+sensitivity_df = local_sensitivity(feature_row)
+st.markdown("**Main prediction drivers for this restaurant**")
+st.caption(
+    "Each row moves one numeric feature to the median value among Grade A restaurants "
+    "and measures the change in P(A).  This is local sensitivity, not PCA variance."
+)
+driver_display = sensitivity_df.copy()
+driver_display["Current"] = driver_display.apply(
+    lambda row: _format_raw_feature(row["Feature"], row["Current"]), axis=1,
+)
+driver_display["Grade A Reference"] = driver_display.apply(
+    lambda row: _format_raw_feature(row["Feature"], row["Reference"]), axis=1,
+)
+driver_display["Change in P(A)"] = driver_display["Delta P(A)"].map(lambda v: f"{v * 100:+.1f} pts")
+st.dataframe(
+    driver_display[["Feature", "Current", "Grade A Reference", "Change in P(A)", "Actionable"]],
+    use_container_width=True,
+    hide_index=True,
+)
+
+if pred_grade != "A" or true_grade != "A":
+    st.markdown("**Path to A**")
+    path = find_path_to_a(feature_row)
+    if path is None:
+        st.warning("This model does not have enough actionable numeric inputs to compute a path to A.")
+    else:
+        path_grade = _grade_from_probs(path["probs"])
+        current_total = _raw_value("num_violations", feature_row[FEATURE_INDEX["num_violations"]])
+        current_vpi = _raw_value("violations_per_inspection",
+                                 feature_row[FEATURE_INDEX["violations_per_inspection"]])
+        if path.get("fallback"):
+            st.warning(
+                "Even the most aggressive reduction in actionable violation features did not "
+                "flip this profile to A.  The recommendation below shows the strongest model-implied move."
+            )
+        else:
+            st.success(
+                f"The smallest searched actionable move that flips the model to Grade A reaches "
+                f"P(A) = {path['probs'][0] * 100:.1f}%."
+            )
+        rec_rows = pd.DataFrame([
+            {
+                "Actionable feature": "Total violations",
+                "Current": _format_raw_feature("num_violations", current_total),
+                "Suggested target": _format_raw_feature("num_violations", path["num_violations"]),
+            },
+            {
+                "Actionable feature": "Violations per inspection",
+                "Current": f"{current_vpi:.2f}",
+                "Suggested target": f"{path['violations_per_inspection']:.2f}",
+            },
+        ])
+        st.dataframe(rec_rows, use_container_width=True, hide_index=True)
+        st.caption(
+            f"Recommended targets hold borough, cuisine, and inspection history fixed.  "
+            f"The counterfactual prediction is Grade {path_grade}; actual DOHMH grades still "
+            "depend on future inspections and official score thresholds."
+        )
+
+with st.expander("🧭 PCA context map: where this profile sits", expanded=False):
+    st.caption(
+        "This uses the project's NumPy PCA implementation to visualize the held-out feature "
+        "space.  PCA shows broad data geometry; improvement advice above comes from the MLP "
+        "counterfactual search, not from PCA alone."
+    )
+    pca_payload = compute_pca_context()
+    coords = pca_payload["coords"]
+    selected_matches = meta_test.index[meta_test["camis"] == selected["camis"]].tolist()
+    selected_idx = selected_matches[0] if selected_matches else 0
+    edited_coord = transform_with_cached_pca(edited_row.reshape(1, -1), pca_payload)[0]
+
+    pca_fig = go.Figure()
+    pca_fig.add_trace(go.Scattergl(
+        x=coords[:, 0],
+        y=coords[:, 1],
+        mode="markers",
+        marker=dict(
+            size=6,
+            color=[GRADE_COLORS.get(g, "#8E8E93") for g in meta_test["grade"].tolist()],
+            opacity=0.45,
+        ),
+        text=meta_test["dba"],
+        hovertemplate="%{text}<extra></extra>",
+        name="Held-out restaurants",
+    ))
+    pca_fig.add_trace(go.Scatter(
+        x=[coords[selected_idx, 0]],
+        y=[coords[selected_idx, 1]],
+        mode="markers+text",
+        marker=dict(size=15, color="#111111", symbol="star"),
+        text=["Original"],
+        textposition="top center",
+        name="Original profile",
+    ))
+    pca_fig.add_trace(go.Scatter(
+        x=[edited_coord[0]],
+        y=[edited_coord[1]],
+        mode="markers+text",
+        marker=dict(size=15, color="#007AFF", symbol="diamond"),
+        text=["Edited"],
+        textposition="bottom center",
+        name="Edited profile",
+    ))
+    pca_fig.update_layout(
+        title=(
+            f"PCA projection of model inputs "
+            f"(PC1 {pca_payload['explained'][0] * 100:.1f}%, "
+            f"PC2 {pca_payload['explained'][1] * 100:.1f}% variance)"
+        ),
+        xaxis_title="PC1", yaxis_title="PC2",
+        height=440, margin=dict(l=20, r=20, t=60, b=40),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font_family="Inter, -apple-system, sans-serif",
+    )
+    st.plotly_chart(pca_fig, use_container_width=True)
  
  
 # ---------------------------------------------------------------------------
@@ -538,11 +995,11 @@ with st.expander("🔢 What the model actually sees (input feature vector)", exp
  
  
 # ---------------------------------------------------------------------------
-# Section 3 — Held-out test set performance + feature importance
+# Section 4 — Held-out test set performance + feature importance
 # ---------------------------------------------------------------------------
  
 st.markdown("---")
-st.subheader("3️⃣ How Good is the Classifier — and Why?")
+st.subheader("4️⃣ How Good is the Classifier — and Why?")
 st.caption(
     f"Evaluated on the held-out test set: {len(test_df):,} restaurants the "
     "model has never seen during training, validation, or model selection."
@@ -619,49 +1076,46 @@ with col_per_class:
 st.markdown("---")
 st.markdown("### 🧭 Which Features Actually Drive Predictions?")
 st.caption(
-    "**Permutation importance** — for each feature, we shuffle its values "
-    "across the test set and measure how much accuracy drops.  A large "
-    "drop means the model relies heavily on that feature.  This is a "
-    "stronger signal than PCA (which measures variance, not predictive "
-    "power) when the question is *which inputs matter to the MLP*."
+    "**Permutation importance** — we shuffle each numeric feature, or a whole "
+    "one-hot group, across the held-out test set and measure how much weighted "
+    "F1 drops.  Grouping borough/cuisine keeps one-hot vectors valid and is "
+    "easier to interpret than ranking dozens of sparse category columns."
 )
  
-baseline_acc, importance = compute_permutation_importance()
+baseline_score, importance, metric_name = compute_permutation_importance()
 importance_df = pd.DataFrame(
     sorted(importance.items(), key=lambda kv: -kv[1]),
-    columns=["Feature", "Accuracy Drop"],
+    columns=["Feature / group", "Metric Drop"],
 )
-# Keep only features with meaningful drops so the bar chart stays readable
-importance_df["Accuracy Drop %"] = importance_df["Accuracy Drop"] * 100
-top_features = importance_df.head(15)
+importance_df["Metric Drop %"] = importance_df["Metric Drop"] * 100
+top_features = importance_df.head(8)
  
 imp_fig = go.Figure(go.Bar(
-    x=top_features["Accuracy Drop %"],
-    y=top_features["Feature"],
+    x=top_features["Metric Drop %"],
+    y=top_features["Feature / group"],
     orientation="h",
-    marker_color=["#34C759" if d > 2 else "#FFCC00" if d > 0.5 else "#888"
-                  for d in top_features["Accuracy Drop %"]],
-    text=[f"{d:+.2f}%" for d in top_features["Accuracy Drop %"]],
+    marker_color=["#34C759" if d > 2 else "#FFCC00" if d > 0.5 else "#8E8E93"
+                  for d in top_features["Metric Drop %"]],
+    text=[f"{d:+.2f} pts" for d in top_features["Metric Drop %"]],
     textposition="outside",
 ))
 imp_fig.update_layout(
-    title=f"Top-15 features by permutation importance (baseline acc = {baseline_acc*100:.1f}%)",
-    xaxis=dict(title="Drop in accuracy when feature is shuffled (%)"),
+    title=f"Permutation importance by feature group (baseline {metric_name} = {baseline_score:.3f})",
+    xaxis=dict(title=f"Drop in {metric_name} when shuffled (percentage points)"),
     yaxis=dict(autorange="reversed"),
-    height=500, margin=dict(l=20, r=40, t=60, b=40),
+    height=380, margin=dict(l=20, r=40, t=60, b=40),
     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     font_family="Inter, -apple-system, sans-serif",
 )
 st.plotly_chart(imp_fig, use_container_width=True)
  
-# Narrative — adapts automatically to whichever features survive
-top_driver_name = importance_df.iloc[0]["Feature"]
-top_driver_drop = importance_df.iloc[0]["Accuracy Drop %"]
-low_impact_count = int((importance_df["Accuracy Drop %"] < 0.5).sum())
+top_driver_name = importance_df.iloc[0]["Feature / group"]
+top_driver_drop = importance_df.iloc[0]["Metric Drop %"]
+weak_count = int((importance_df["Metric Drop %"].abs() < 0.5).sum())
 st.caption(
-    f"The top driver is **{top_driver_name}** (shuffling it drops accuracy "
-    f"by {top_driver_drop:.1f}%).  {low_impact_count} of the {input_dim} "
-    "features contribute < 0.5% each — this is typical for one-hot "
-    "encodings where each single category only flips on for a small share "
-    "of the data."
+    f"The strongest global driver is **{top_driver_name}** "
+    f"({top_driver_drop:+.1f} percentage points of {metric_name}).  "
+    f"{weak_count} groups are within ±0.5 points, which means their effect is "
+    "small or noisy under this trained model.  Negative values can happen when "
+    "a weak feature adds noise and shuffling it slightly improves the metric."
 )

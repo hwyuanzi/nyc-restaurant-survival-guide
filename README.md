@@ -107,15 +107,17 @@ Built with **PyTorch**, **Streamlit**, **Plotly**, **pydeck**, and **HuggingFace
 
 **Architecture:**
 ```
-Input (29-D)
-  → FC(29 → 128) → ReLU → Dropout(0.3)
+Input (25-D)
+  → FC(25 → 128) → ReLU → Dropout(0.3)
   → FC(128 → 128) → ReLU → Dropout(0.3)
   → FC(128 → 3)
   → Softmax (3 classes: A, B, C)
 ```
 
 **Training details:**
-- Dataset: ~14,000 real DOHMH restaurants, 29-feature vectors, stratified 80/20 split
+- Dataset: ~14,000 real DOHMH restaurants, 25-feature vectors, stratified 80/20 split
+- Inputs: violation history counts/rates, borough one-hot features, and top-cuisine one-hot features
+- Leakage control: score-derived fields such as `latest_score`, `avg_score`, `max_score`, and `critical_ratio` are excluded because DOHMH letter grades are derived from inspection-score thresholds
 - Optimizer: AdamW
 - Loss: Class-weighted `CrossEntropyLoss` — compensates for heavily imbalanced label distribution (A ≈ 78%, B ≈ 16%, C ≈ 6%)
 - Early stopping: monitors validation F1 (patience = 10 epochs)
@@ -124,7 +126,7 @@ Input (29-D)
 
 **From-scratch requirement:** `models/custom_mlp.py` implements the model class, training loop (mini-batch gradient descent, forward/backward, loss computation), evaluation (confusion matrix, per-class F1/precision/recall), gradient-based feature importance, permutation importance, and a counterfactual adversarial search engine — no scikit-learn wrappers used.
 
-**Counterfactual engine:** Given a restaurant predicted as B or C, gradient descent runs *on the input vector* (weights frozen) to find the minimal L2 perturbation of the violation score, pest control days, and training hours that pushes the softmax output across the grade-A boundary. The result surfaces as actionable "what-if" suggestions in the UI.
+**Classifier explainability UI:** Given a selected held-out restaurant, the Streamlit page exposes actionable sliders for total violations and violations per inspection, context selectors for borough/cuisine, before-vs-after class probabilities, local feature sensitivity, a constrained "Path to A" search, and a PCA context map using the project's NumPy PCA implementation. Improvement advice is limited to actionable violation-pattern features; PCA is used only to explain feature-space geometry.
 
 ---
 
@@ -206,7 +208,7 @@ nyc-restaurant-survival-guide/
 │   ├── ui_utils.py                        # Global Apple-inspired CSS theme
 │   └── pages/
 │       ├── 1_🔍_Semantic_Search.py        # NLP search (Transformers + cosine)
-│       ├── 2_🧪_Health_Grade_Classifier.py # MLP sandbox + counterfactual engine
+│       ├── 2_🧪_Health_Grade_Classifier.py # MLP classifier + what-if explainer
 │       ├── 3_📍_Restaurant_Cluster_Map.py  # K-Means GIS + PyDeck 3D map
 │       ├── 4_📊_PCA_Embedding_Explorer.py  # 3-D PCA + cluster loadings
 │       └── 5_🔮_Recommendations.py        # KNN + RRF + MMR recommendations
