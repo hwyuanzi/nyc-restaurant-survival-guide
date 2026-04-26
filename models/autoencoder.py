@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 
 class RestaurantAutoencoder(nn.Module):
     """
@@ -50,19 +51,33 @@ class RestaurantAutoencoder(nn.Module):
             h = self.encoder[2](h)   # Linear(64 → 32)
             return h
 
-def train_autoencoder(model, X_train, epochs=50, lr=0.001):
+def train_autoencoder(model, X_train, epochs=50, lr=0.001, batch_size=256, shuffle=True):
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    
+    effective_batch_size = max(1, min(int(batch_size), len(X_train)))
+    train_loader = DataLoader(
+        TensorDataset(X_train),
+        batch_size=effective_batch_size,
+        shuffle=shuffle,
+    )
+
     model.train()
     for epoch in range(epochs):
-        optimizer.zero_grad()
-        reconstruction, _ = model(X_train)
-        loss = criterion(reconstruction, X_train)
-        loss.backward()
-        optimizer.step()
-        
+        epoch_loss = 0.0
+        total_items = 0
+        for (batch_X,) in train_loader:
+            optimizer.zero_grad()
+            reconstruction, _ = model(batch_X)
+            loss = criterion(reconstruction, batch_X)
+            loss.backward()
+            optimizer.step()
+
+            batch_items = int(batch_X.shape[0])
+            epoch_loss += float(loss.item()) * batch_items
+            total_items += batch_items
+
         if (epoch + 1) % 10 == 0:
-            print(f'AE Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
+            mean_loss = epoch_loss / max(total_items, 1)
+            print(f'AE Epoch [{epoch+1}/{epochs}], Loss: {mean_loss:.4f}')
             
     return model

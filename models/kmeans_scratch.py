@@ -68,11 +68,12 @@ class KMeansScratch:
 
         for _ in range(1, self.n_clusters):
             # D²(x) = min squared distance from x to any centroid chosen so far
-            D2 = np.array(
-                [min(np.dot(x - c, x - c) for c in centroids) for x in X]
-            )
+            current_centroids = np.asarray(centroids, dtype=X.dtype)
+            diff = X[:, None, :] - current_centroids[None, :, :]
+            D2 = np.sum(diff * diff, axis=2).min(axis=1)
             # Sample next centroid with probability proportional to D²
-            probs = D2 / D2.sum()
+            total = float(D2.sum())
+            probs = D2 / total if total > 0 else np.full(n, 1.0 / n, dtype=np.float64)
             cumprobs = np.cumsum(probs)
             r = rng.random()
             idx = int(np.searchsorted(cumprobs, r))

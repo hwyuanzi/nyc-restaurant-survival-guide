@@ -20,6 +20,9 @@ class CustomMLP(nn.Module):
         self.fc3 = nn.Linear(hidden_dim, output_dim)
         
     def forward(self, x):
+        if torch.is_floating_point(x):
+            # Keep a single missing feature from poisoning the whole prediction path.
+            x = torch.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
         out = self.fc1(x)
         out = self.relu(out)
         out = self.dropout(out)
