@@ -36,6 +36,7 @@ def test_get_clustered_data_supports_k2_without_projection_crash(tmp_path, monke
                 "price_tier": 1,
                 "avg_rating": 4.3,
                 "review_count": 120,
+                "boro": "Brooklyn",
                 "score": 8,
                 "grade": "A",
                 "tags": "noodles dumplings",
@@ -51,6 +52,7 @@ def test_get_clustered_data_supports_k2_without_projection_crash(tmp_path, monke
                 "price_tier": 3,
                 "avg_rating": 4.6,
                 "review_count": 240,
+                "boro": "Manhattan",
                 "score": 10,
                 "grade": "A",
                 "tags": "sushi omakase",
@@ -66,6 +68,7 @@ def test_get_clustered_data_supports_k2_without_projection_crash(tmp_path, monke
                 "price_tier": 2,
                 "avg_rating": 4.1,
                 "review_count": 90,
+                "boro": "Queens",
                 "score": 12,
                 "grade": "B",
                 "tags": "pizza pasta",
@@ -81,6 +84,7 @@ def test_get_clustered_data_supports_k2_without_projection_crash(tmp_path, monke
                 "price_tier": 1,
                 "avg_rating": 4.0,
                 "review_count": 75,
+                "boro": "Bronx",
                 "score": 15,
                 "grade": "B",
                 "tags": "tacos street food",
@@ -116,8 +120,7 @@ def test_get_clustered_data_supports_k2_without_projection_crash(tmp_path, monke
 
     monkeypatch.setattr(clustering_utils, "CACHE_PATH", str(tmp_path / "cluster_cache.parquet"))
     monkeypatch.setattr(clustering_utils, "MODEL_PATH", str(tmp_path / "kmeans_model.joblib"))
-    monkeypatch.setattr(clustering_utils, "KMeans", DummyKMeans)
-    monkeypatch.setattr(clustering_utils, "MiniBatchKMeans", DummyKMeans)
+    monkeypatch.setattr(clustering_utils, "KMeansScratch", DummyKMeans)
     monkeypatch.setattr(clustering_utils, "save_cache", lambda *args, **kwargs: None)
 
     clustered_df, _, _, pca = clustering_utils.get_clustered_data(df, user_history={}, k=2, force=True)

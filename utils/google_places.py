@@ -5,13 +5,15 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from utils.search import neighborhood_from_zipcode
+
 PLACES_SEARCH = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 PLACES_DETAILS = "https://maps.googleapis.com/maps/api/place/details/json"
 PLACES_PHOTO = "https://maps.googleapis.com/maps/api/place/photo"
-DEFAULT_GOOGLE_API_KEY = "AIzaSyBM_Td0_NgsHAmjOldP7AVH5pySmZH--I8"
+
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 ENRICHED_CACHE_DIR = DATA_DIR / "cache"
-
+import os
 
 def get_google_api_key():
     try:
@@ -20,7 +22,7 @@ def get_google_api_key():
             return secret_value
     except Exception:
         pass
-    return DEFAULT_GOOGLE_API_KEY
+    return os.environ.get("GOOGLE_API_KEY", "")
 
 
 def _ensure_cache_dir():
@@ -95,7 +97,22 @@ def enrich_with_google(nyc_df, sample_size, api_key):
     if nyc_df.empty or not api_key:
         return pd.DataFrame()
 
-    sample = nyc_df.sample(min(sample_size, len(nyc_df)), random_state=42).copy()
+    prioritized = nyc_df.copy()
+    prioritized["zipcode_norm"] = prioritized.get("zipcode", pd.Series([""] * len(prioritized), index=prioritized.index)).fillna("").astype(str).str[:5]
+    prioritized["neighborhood"] = prioritized["zipcode_norm"].apply(neighborhood_from_zipcode)
+    prioritized["_quality_rank"] = pd.to_numeric(prioritized.get("score", 999), errors="coerce").fillna(999)
+    prioritized["_group_neighborhood"] = prioritized["neighborhood"].where(prioritized["neighborhood"].astype(str).str.len() > 0, prioritized.get("boro", ""))
+    prioritized = prioritized.sort_values(["_quality_rank", "dba", "camis"], ascending=[True, True, True]).reset_index(drop=True)
+
+    coverage_frames = []
+    coverage_frames.append(prioritized.drop_duplicates(subset=["_group_neighborhood", "cuisine"], keep="first"))
+    coverage_frames.append(prioritized.drop_duplicates(subset=["_group_neighborhood"], keep="first"))
+    coverage_frames.append(prioritized.drop_duplicates(subset=["cuisine"], keep="first"))
+    coverage_pool = pd.concat(coverage_frames, ignore_index=True).drop_duplicates(subset=["camis"], keep="first")
+
+    remaining = prioritized[~prioritized["camis"].isin(coverage_pool["camis"])]
+    sample = pd.concat([coverage_pool, remaining], ignore_index=True).head(min(sample_size, len(prioritized))).copy()
+    sample = sample.drop(columns=["zipcode_norm", "neighborhood", "_quality_rank", "_group_neighborhood"], errors="ignore")
     enriched_rows = []
     progress = st.progress(0, text="Fetching Google Places data...")
     total = len(sample)

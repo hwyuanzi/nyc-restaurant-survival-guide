@@ -33,6 +33,44 @@ def _format_budget_slider_value(value):
     return r"\$" * int(value)
 
 
+def format_budget_display(budget_value: str) -> str:
+    labels = {
+        "$": "Budget ($)",
+        "$$": "Mid-Range ($$)",
+        "$$$": "Premium ($$$)",
+        "$$$$": "Luxury ($$$$)",
+    }
+    return labels.get(budget_value, budget_value or "Not set")
+
+
+def get_valid_borough_options(df: pd.DataFrame) -> list[str]:
+    if df is None or df.empty or "boro" not in df.columns:
+        return BOROUGH_OPTIONS.copy()
+    present = set(
+        df["boro"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+    return [borough for borough in BOROUGH_OPTIONS if borough in present]
+
+
+def get_valid_cuisine_options(df: pd.DataFrame, column: str = "cuisine_type") -> list[str]:
+    if df is None or df.empty or column not in df.columns:
+        return []
+    invalid_values = {"", "0", "Unknown", "Nan", "None"}
+    values = sorted(
+        {
+            str(value).strip()
+            for value in df[column].dropna().tolist()
+            if str(value).strip() and str(value).strip().title() not in invalid_values
+            and str(value).strip() not in invalid_values
+        }
+    )
+    return values
+
+
 def _slugify(value):
     slug = re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
     return slug or DEFAULT_PROFILE_ID
@@ -204,10 +242,7 @@ def profile_to_user_history(profile, restaurant_df=None):
             continue
         if restaurant_id not in visited_ids:
             visited_ids.append(restaurant_id)
-        try:
-            rated[restaurant_id] = float(item.get("rating", 5.0))
-        except (TypeError, ValueError):
-            rated[restaurant_id] = 5.0
+        rated[restaurant_id] = 1.0
     return {
         "visited_ids": visited_ids,
         "rated": rated,
@@ -314,15 +349,9 @@ def predict_user_cluster(user_history, df_clustered, kmeans, scaler):
     if visited.empty:
         return -1
 
-    rated = user_history.get("rated", {})
     cluster_votes = (
-        visited.assign(
-            vote_weight=visited["restaurant_id"].astype(str).map(
-                lambda restaurant_id: float(rated.get(restaurant_id, 3.0)) / 5.0
-            )
-        )
-        .groupby("cluster_id")["vote_weight"]
-        .sum()
+        visited.groupby("cluster_id")
+        .size()
         .sort_values(ascending=False)
     )
     if not cluster_votes.empty and len(cluster_votes) == 1:
@@ -331,12 +360,11 @@ def predict_user_cluster(user_history, df_clustered, kmeans, scaler):
         return int(cluster_votes.index[0])
 
     try:
-        from utils.clustering import apply_user_weights, build_feature_matrix, prepare_clustering_space
+        from utils.clustering import build_feature_matrix, prepare_clustering_space
 
         X, _, clustered = build_feature_matrix(df_clustered)
-        X_aug = apply_user_weights(X, clustered, user_history)
         visited_mask = clustered["restaurant_id"].isin(user_history["visited_ids"])
-        visited_vecs = X_aug[visited_mask.values]
+        visited_vecs = X[visited_mask.values]
         user_vec = visited_vecs.mean(axis=0).reshape(1, -1)
         _, user_vec_cluster, _ = prepare_clustering_space(user_vec, scaler=scaler, fit=False)
         return int(kmeans.predict(user_vec_cluster)[0])
@@ -354,7 +382,7 @@ def init_session_state():
         "selected_cluster_label": "All Clusters",
         "active_profile_id": None,
         "user_history": get_default_user_history(),
-        "optimal_k": 8,
+        "optimal_k": 9,
         "raw_df": None,
     }
     for key, value in defaults.items():
@@ -379,31 +407,17 @@ def render_profile_sidebar():
         save_profiles(profiles)
 
     profile_ids = list(profiles.keys())
-    if st.session_state["active_profile_id"] not in profiles:
-        st.session_state["active_profile_id"] = profile_ids[0]
+    if st.session_state.get("authenticated_profile_id") not in profiles:
+        # Fallback if somehow they are authenticated but profile is missing
+        st.session_state["authenticated_profile_id"] = profile_ids[0]
 
-    profile_labels = {profile_id: profiles[profile_id]["name"] for profile_id in profile_ids}
-    current_index = profile_ids.index(st.session_state["active_profile_id"])
+    st.session_state["active_profile_id"] = st.session_state["authenticated_profile_id"]
+    active_name = profiles[st.session_state["active_profile_id"]]["name"]
 
-    st.title("👤 Your Profile")
-    selected_profile_id = st.selectbox(
-        "Choose a profile",
-        options=profile_ids,
-        format_func=lambda profile_id: profile_labels.get(profile_id, profile_id),
-        index=current_index,
-    )
-    st.session_state["active_profile_id"] = selected_profile_id
-
-    new_profile_name = st.text_input("Create a new profile", placeholder="e.g. Rahul")
-    if st.button("Create / switch profile", use_container_width=True):
-        clean_name = new_profile_name.strip() or "Guest"
-        new_profile = _default_profile(name=clean_name, profile_id=_slugify(clean_name))
-        existing = find_profile_by_name(clean_name)
-        if existing:
-            st.session_state["active_profile_id"] = existing["id"]
-        else:
-            upsert_profile(new_profile)
-            st.session_state["active_profile_id"] = new_profile["id"]
+    st.title(f"👤 Welcome, {active_name}")
+    
+    if st.button("Logout", use_container_width=True):
+        st.session_state["authenticated_profile_id"] = None
         st.rerun()
 
     profile = get_profile(profile_id=st.session_state["active_profile_id"])
@@ -450,6 +464,67 @@ def render_profile_sidebar():
 
     profile = get_profile(profile_id=profile["id"])
     st.caption(f"Saved likes: {len(profile.get('likes', []))}")
+
+    with st.expander("Account Management"):
+        st.caption("Update your password or permanently delete this profile.")
+        current_password = st.text_input("Current password", type="password", key="account_current_password")
+        new_password = st.text_input("New password", type="password", key="account_new_password")
+        confirm_password = st.text_input("Confirm new password", type="password", key="account_confirm_password")
+
+        if st.button("Update password", use_container_width=True):
+            if new_password != confirm_password:
+                st.error("New password and confirmation do not match.")
+            else:
+                from utils.auth import change_password
+
+                success, message = change_password(profile["id"], current_password, new_password)
+                if success:
+                    st.success(message)
+                else:
+                    st.error(message)
+
+        st.markdown("---")
+        st.caption("Deleting your profile removes your saved likes and preferences.")
+        delete_confirm_name = st.text_input(
+            f"Type `{profile['name']}` to confirm deletion",
+            key="account_delete_name",
+        ).strip()
+        delete_password = st.text_input("Password for deletion", type="password", key="account_delete_password")
+        delete_disabled = delete_confirm_name != profile["name"]
+        if st.button("Delete my profile", use_container_width=True, disabled=delete_disabled):
+            from utils.auth import delete_user_account
+
+            success, message = delete_user_account(profile["id"], delete_password)
+            if success:
+                st.session_state["authenticated_profile_id"] = None
+                st.session_state["active_profile_id"] = None
+                st.session_state["clustered_df"] = None
+                st.session_state["user_history"] = get_default_user_history()
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+
+    st.session_state["user_history"] = profile_to_user_history(profile)
+    return profile
+
+
+def get_active_profile():
+    """Return the authenticated profile without rendering sidebar controls."""
+    init_session_state()
+    profiles = load_profiles()
+    if not profiles:
+        guest_profile = _default_profile()
+        profiles[guest_profile["id"]] = guest_profile
+        save_profiles(profiles)
+
+    profile_ids = list(profiles.keys())
+    authenticated_id = st.session_state.get("authenticated_profile_id")
+    if authenticated_id not in profiles:
+        authenticated_id = profile_ids[0]
+
+    st.session_state["active_profile_id"] = authenticated_id
+    profile = get_profile(profile_id=authenticated_id)
     st.session_state["user_history"] = profile_to_user_history(profile)
     return profile
 
@@ -485,7 +560,6 @@ def add_liked_restaurant(profile_name, restaurant_row, source="app"):
         "boro": restaurant_row.get("boro") or restaurant_row.get("neighborhood", ""),
         "grade": restaurant_row.get("grade", "N/A"),
         "score": int(pd.to_numeric(restaurant_row.get("score", 0), errors="coerce") or 0),
-        "rating": 5.0,
         "source": source,
         "liked_at": _now_iso(),
     }
@@ -496,5 +570,57 @@ def add_liked_restaurant(profile_name, restaurant_row, source="app"):
     profiles[profile_id] = profile
     save_profiles(profiles)
 
+    st.session_state["user_history"] = profile_to_user_history(profile)
+    return True
+
+
+def is_restaurant_liked(profile_name, restaurant_row):
+    profile = get_profile(name=profile_name)
+    likes = profile.get("likes", [])
+    camis = restaurant_row.get("camis") or restaurant_row.get("restaurant_id")
+    restaurant_id = str(
+        restaurant_row.get("restaurant_id")
+        or restaurant_row.get("camis")
+        or restaurant_row.get("g_place_id")
+        or restaurant_row.get("dba")
+    )
+    camis_text = str(camis).strip() if camis is not None and str(camis).strip() else ""
+    return any(
+        str(item.get("restaurant_id")) == restaurant_id
+        or (camis_text and str(item.get("camis", "")).strip() == camis_text)
+        for item in likes
+    )
+
+
+def remove_liked_restaurant(profile_name, restaurant_row):
+    profiles = load_profiles()
+    profile = get_profile(name=profile_name)
+    profile_id = profile["id"]
+    likes = profile.get("likes", [])
+
+    camis = restaurant_row.get("camis") or restaurant_row.get("restaurant_id")
+    restaurant_id = str(
+        restaurant_row.get("restaurant_id")
+        or restaurant_row.get("camis")
+        or restaurant_row.get("g_place_id")
+        or restaurant_row.get("dba")
+    )
+    camis_text = str(camis).strip() if camis is not None and str(camis).strip() else ""
+
+    new_likes = [
+        item for item in likes
+        if not (
+            str(item.get("restaurant_id")) == restaurant_id
+            or (camis_text and str(item.get("camis", "")).strip() == camis_text)
+        )
+    ]
+    
+    if len(new_likes) == len(likes):
+        return False
+        
+    profile["likes"] = new_likes
+    profile["updated_at"] = _now_iso()
+    profiles[profile_id] = profile
+    save_profiles(profiles)
     st.session_state["user_history"] = profile_to_user_history(profile)
     return True

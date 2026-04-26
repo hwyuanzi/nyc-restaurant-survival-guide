@@ -7,35 +7,68 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from utils.user_profile import build_profile_prompt, score_restaurants_for_user
 
-CUISINE_KEYWORDS = {
-    "American": "burgers steaks BBQ comfort food fries classic American diner",
-    "Italian": "pasta pizza risotto tiramisu antipasto gelato wine",
-    "Chinese": "dim sum dumplings noodles stir fry Peking duck Cantonese Sichuan",
-    "Japanese": "sushi ramen sashimi tempura udon miso izakaya omakase",
-    "Mexican": "tacos burritos enchiladas guacamole margaritas salsa tamales",
-    "French": "croissants baguette coq au vin escargot crepes bistro wine",
-    "Indian": "curry tandoori naan biryani masala daal spices South Asian",
-    "Thai": "pad thai green curry satay lemongrass coconut milk noodles",
-    "Korean": "bibimbap kimchi bulgogi Korean BBQ tofu banchan galbi",
-    "Vietnamese": "pho banh mi spring rolls lemongrass rice noodle soup bun",
-    "Mediterranean": "hummus falafel gyros shawarma olive oil mezze halloumi",
-    "Latin": "empanadas rice beans plantains ceviche Latin fusion churros",
-    "Cafe": "coffee espresso brunch pastries sandwiches light fare",
-    "Pizza": "New York slice thin crust mozzarella tomato sauce calzone",
-    "Seafood": "lobster oysters shrimp clams crab fresh fish grilled seafood",
-    "Bakery": "bread pastries croissants cakes artisan baked goods sourdough",
-    "Steak": "steakhouse prime rib tenderloin ribeye porterhouse dry-aged beef",
-    "Vegetarian": "vegan plant-based tofu salads grain bowls organic healthy",
-    "Middle Eastern": "kebab hummus falafel tahini shawarma pita manakeesh",
-    "Spanish": "tapas paella sangria chorizo jamon iberico pintxos",
-    "Juice Bar": "smoothies cold-pressed juice acai bowls healthy drinks",
-    "Ice Cream": "gelato soft serve sundaes sorbet frozen desserts waffle cone",
-    "Sandwiches": "subs hoagies paninis wraps deli club sandwich hero",
-    "Chicken": "fried chicken wings rotisserie grilled chicken nuggets",
-    "Hamburgers": "burgers smash burger cheeseburger double patty gourmet",
-    "Caribbean": "jerk chicken rice peas plantains oxtail roti callaloo",
-    "Ethiopian": "injera berbere lentils stew communal eating East African",
-    "Greek": "souvlaki moussaka spanakopita tzatziki dolmades feta",
+QUERY_CUISINE_HINTS = {
+    # American / Burgers / Steak
+    "american": {"American"}, "burger": {"Hamburgers", "American"}, "burgers": {"Hamburgers", "American"},
+    "hamburger": {"Hamburgers"}, "hamburgers": {"Hamburgers"}, "bbq": {"Korean", "American"}, 
+    "barbecue": {"American"}, "steak": {"Steak", "American"}, "steaks": {"Steak", "American"}, 
+    "fries": {"American"}, "comfort food": {"American"},
+    
+    # Italian / Pizza
+    "italian": {"Italian"}, "pasta": {"Italian"}, "pizza": {"Pizza", "Italian"},
+    "risotto": {"Italian"}, "tiramisu": {"Italian", "Bakery"}, "antipasto": {"Italian"},
+    "gelato": {"Ice Cream", "Italian"},
+    
+    # Chinese
+    "chinese": {"Chinese"}, "dim sum": {"Chinese"}, "dumpling": {"Chinese"}, "dumplings": {"Chinese"},
+    "noodles": {"Chinese", "Japanese", "Thai", "Vietnamese"}, "stir fry": {"Chinese"}, 
+    "peking duck": {"Chinese"}, "cantonese": {"Chinese"}, "sichuan": {"Chinese"},
+    
+    # Japanese
+    "japanese": {"Japanese"}, "sushi": {"Japanese"}, "ramen": {"Japanese"}, "sashimi": {"Japanese"},
+    "tempura": {"Japanese"}, "udon": {"Japanese"}, "miso": {"Japanese"}, "izakaya": {"Japanese"},
+    "omakase": {"Japanese"},
+    
+    # Mexican / Latin / Spanish
+    "mexican": {"Mexican"}, "taco": {"Mexican"}, "tacos": {"Mexican"}, "burrito": {"Mexican"},
+    "burritos": {"Mexican"}, "enchiladas": {"Mexican"}, "guacamole": {"Mexican"}, 
+    "margaritas": {"Mexican"}, "salsa": {"Mexican"}, "tamales": {"Mexican"},
+    "latin": {"Latin"}, "empanadas": {"Latin", "Spanish"}, "plantains": {"Latin", "Caribbean"},
+    "ceviche": {"Latin", "Peruvian"}, "churros": {"Latin", "Mexican", "Spanish"},
+    "spanish": {"Spanish"}, "tapas": {"Spanish"}, "paella": {"Spanish"}, "sangria": {"Spanish"},
+    "chorizo": {"Spanish", "Mexican"},
+    
+    # French
+    "french": {"French"}, "croissant": {"French", "Bakery"}, "croissants": {"French", "Bakery"},
+    "baguette": {"French", "Bakery"}, "crepes": {"French"}, "bistro": {"French"},
+    
+    # Asian (Other)
+    "indian": {"Indian"}, "curry": {"Indian", "Thai", "Japanese"}, "tandoori": {"Indian"},
+    "naan": {"Indian"}, "biryani": {"Indian"}, "masala": {"Indian"}, "daal": {"Indian"},
+    "thai": {"Thai"}, "pad thai": {"Thai"}, "satay": {"Thai"}, "lemongrass": {"Thai", "Vietnamese"},
+    "korean": {"Korean"}, "korean bbq": {"Korean"}, "bibimbap": {"Korean"}, "kimchi": {"Korean"},
+    "bulgogi": {"Korean"}, "tofu": {"Korean", "Vegetarian", "Chinese"}, "banchan": {"Korean"},
+    "vietnamese": {"Vietnamese"}, "pho": {"Vietnamese"}, "banh mi": {"Vietnamese"},
+    "spring rolls": {"Vietnamese", "Chinese"},
+    
+    # Mediterranean / Middle Eastern
+    "mediterranean": {"Mediterranean"}, "middle eastern": {"Middle Eastern"},
+    "hummus": {"Mediterranean", "Middle Eastern"}, "falafel": {"Mediterranean", "Middle Eastern"},
+    "gyros": {"Mediterranean", "Greek"}, "shawarma": {"Mediterranean", "Middle Eastern"},
+    "mezze": {"Mediterranean"}, "halloumi": {"Mediterranean"}, "kebab": {"Middle Eastern"},
+    "pita": {"Middle Eastern", "Mediterranean"}, "greek": {"Greek"}, "souvlaki": {"Greek"},
+    "tzatziki": {"Greek"}, "feta": {"Greek"},
+    
+    # Others
+    "cafe": {"Cafe"}, "coffee": {"Cafe", "Coffee/Tea"}, "espresso": {"Cafe"}, "brunch": {"Cafe", "American"},
+    "seafood": {"Seafood"}, "lobster": {"Seafood"}, "oysters": {"Seafood"}, "shrimp": {"Seafood"},
+    "bakery": {"Bakery"}, "pastries": {"Bakery", "Cafe"}, "cakes": {"Bakery"}, "dessert": {"Bakery", "Ice Cream"},
+    "vegetarian": {"Vegetarian"}, "vegan": {"Vegetarian"}, "salads": {"Vegetarian"},
+    "juice": {"Juice Bar"}, "juice bar": {"Juice Bar"}, "smoothies": {"Juice Bar"},
+    "ice cream": {"Ice Cream"}, "sandwich": {"Sandwiches"}, "sandwiches": {"Sandwiches"},
+    "chicken": {"Chicken"}, "wings": {"Chicken", "American"}, "fried chicken": {"Chicken"},
+    "caribbean": {"Caribbean"}, "jerk chicken": {"Caribbean"}, "oxtail": {"Caribbean"},
+    "ethiopian": {"Ethiopian"}, "injera": {"Ethiopian"}, "bagel": {"Sandwiches", "Bakery", "Coffee/Tea"},
 }
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 EMBEDDING_CACHE_DIR = DATA_DIR / "cache"
@@ -122,60 +155,7 @@ MANUAL_NEIGHBORHOOD_ZIPCODES = {
 }
 for _neighborhood, _zipcodes in MANUAL_NEIGHBORHOOD_ZIPCODES.items():
     NEIGHBORHOOD_TO_ZIPCODES.setdefault(_neighborhood, set()).update(_zipcodes)
-QUERY_CUISINE_HINTS = {
-    "american": {"American"},
-    "burger": {"Hamburgers", "American"},
-    "burgers": {"Hamburgers", "American"},
-    "bbq": {"Korean", "American"},
-    "barbecue": {"American"},
-    "italian": {"Italian"},
-    "ramen": {"Japanese"},
-    "sushi": {"Japanese"},
-    "omakase": {"Japanese"},
-    "japanese": {"Japanese"},
-    "chinese": {"Chinese"},
-    "dim sum": {"Chinese"},
-    "dumpling": {"Chinese"},
-    "dumplings": {"Chinese"},
-    "korean bbq": {"Korean"},
-    "korean": {"Korean"},
-    "pho": {"Vietnamese"},
-    "vietnamese": {"Vietnamese"},
-    "pad thai": {"Thai"},
-    "thai": {"Thai"},
-    "curry": {"Indian", "Thai"},
-    "indian": {"Indian"},
-    "taco": {"Mexican"},
-    "tacos": {"Mexican"},
-    "mexican": {"Mexican"},
-    "pasta": {"Italian"},
-    "pizza": {"Pizza"},
-    "french": {"French"},
-    "greek": {"Greek"},
-    "mediterranean": {"Mediterranean"},
-    "middle eastern": {"Middle Eastern"},
-    "shawarma": {"Middle Eastern"},
-    "falafel": {"Middle Eastern"},
-    "ethiopian": {"Ethiopian"},
-    "caribbean": {"Caribbean"},
-    "seafood": {"Seafood"},
-    "steak": {"Steak"},
-    "bakery": {"Bakery"},
-    "dessert": {"Bakery", "Ice Cream"},
-    "ice cream": {"Ice Cream"},
-    "gelato": {"Ice Cream"},
-    "cafe": {"Cafe"},
-    "coffee": {"Cafe"},
-    "juice": {"Juice Bar"},
-    "juice bar": {"Juice Bar"},
-    "vegetarian": {"Vegetarian"},
-    "vegan": {"Vegetarian"},
-    "sandwich": {"Sandwiches"},
-    "sandwiches": {"Sandwiches"},
-    "chicken": {"Chicken"},
-    "spanish": {"Spanish"},
-    "bagel": {"Sandwiches", "Bakery", "Coffee/Tea"},
-}
+
 PRICE_HINTS = {
     "$": 1,
     "$$": 2,
@@ -188,6 +168,18 @@ PRICE_HINTS = {
     "upscale": 3,
     "fancy": 3,
     "luxury": 4,
+    "expensive": 4,
+    "expansive": 4,
+    "pricey": 4,
+    "pricy": 4,
+    "high end": 4,
+}
+
+CUISINE_MATCH_ALIASES = {
+    "Vietnamese": {
+        "vietnamese", "southeast asian", "asian/asian fusion",
+        "pho", "banh mi", "saigon", "viet",
+    },
 }
 
 
@@ -223,7 +215,6 @@ def build_description(row):
     grade = row.get("grade", "")
     score = row.get("score", 0)
     address = row.get("address", "")
-    extras = CUISINE_KEYWORDS.get(cuisine, cuisine)
     summary = row.get("g_summary", "")
     rating = pd.to_numeric(row.get("g_rating"), errors="coerce")
     price = pd.to_numeric(row.get("g_price"), errors="coerce")
@@ -239,7 +230,6 @@ def build_description(row):
 
     return (
         f"{name} is a {cuisine} restaurant in {location_text}, New York City. "
-        f"It serves {extras}. "
         f"{summary} "
         f"{rating_str} {price_str} "
         f"Health inspection grade: {grade} ({hygiene}, score {score}). "
@@ -274,12 +264,37 @@ def get_embeddings(df, cache_key):
     return embeddings
 
 
+def _count_token_matches(query_tokens, text):
+    text_toks = set(re.findall(r'\b\w+\b', str(text).lower()))
+    matches = 0
+    for t in query_tokens:
+        if t in text_toks or f"{t}s" in text_toks or f"{t}es" in text_toks:
+            matches += 1
+        elif t.endswith('s') and t[:-1] in text_toks:
+            matches += 1
+        elif t.endswith('es') and t[:-2] in text_toks:
+            matches += 1
+    return matches
+
 def lexical_score(query, text):
     query_tokens = {token for token in str(query).lower().split() if len(token) > 2}
-    text_tokens = {token for token in str(text).lower().split() if len(token) > 2}
-    if not query_tokens or not text_tokens:
+    if not query_tokens or not str(text).strip():
         return 0.0
-    return len(query_tokens & text_tokens) / len(query_tokens)
+    matches = _count_token_matches(query_tokens, text)
+    return matches / len(query_tokens)
+
+
+def _cuisine_intent_match(target_cuisines, cuisine_value, searchable_text=""):
+    cuisine_text = str(cuisine_value or "").lower()
+    combined_text = f"{cuisine_text} {str(searchable_text or '').lower()}"
+    for target in target_cuisines:
+        target_lower = str(target).lower()
+        aliases = CUISINE_MATCH_ALIASES.get(target, {target_lower})
+        if target_lower in cuisine_text:
+            return 1.0
+        if any(alias in combined_text for alias in aliases):
+            return 1.0
+    return 0.0
 
 
 def _normalize_location_text(value):
@@ -434,39 +449,72 @@ def _extract_query_intent(query):
             desired_cuisines.update(cuisines)
 
     cuisine_vocab = {
+        "america": "American",
         "american": "American",
+        "usa": "American",
         "bakery": "Bakery",
         "cafe": "Cafe",
         "caribbean": "Caribbean",
         "chicken": "Chicken",
+        "china": "Chinese",
         "chinese": "Chinese",
+        "dumpling": "Chinese",
+        "dim sum": "Chinese",
+        "ethiopia": "Ethiopian",
         "ethiopian": "Ethiopian",
+        "france": "French",
         "french": "French",
+        "greece": "Greek",
         "greek": "Greek",
         "hamburger": "Hamburgers",
         "hamburgers": "Hamburgers",
+        "burger": "Hamburgers",
         "indian": "Indian",
         "italian": "Italian",
+        "italy": "Italian",
+        "pasta": "Italian",
         "japanese": "Japanese",
+        "japan": "Japanese",
+        "sushi": "Japanese",
         "juice": "Juice Bar",
         "korean": "Korean",
+        "korea": "Korean",
         "mediterranean": "Mediterranean",
         "mexican": "Mexican",
+        "mexico": "Mexican",
+        "taco": "Mexican",
         "middle eastern": "Middle Eastern",
         "pizza": "Pizza",
         "sandwich": "Sandwiches",
         "sandwiches": "Sandwiches",
         "seafood": "Seafood",
+        "spain": "Spanish",
         "spanish": "Spanish",
-        "steak": "Steak",
+        "steak": "Steakhouse",
+        "steakhouse": "Steakhouse",
         "thai": "Thai",
+        "thailand": "Thai",
         "vegetarian": "Vegetarian",
-        "vegan": "Vegetarian",
+        "vegan": "Vegan",
+        "vietnam": "Vietnamese",
         "vietnamese": "Vietnamese",
+        "barbecue": "Barbecue",
+        "bbq": "Barbecue",
+        "coffee": "Coffee/Tea",
+        "tea": "Coffee/Tea",
+        "bagel": "Bagels/Pretzels",
+        "bagels": "Bagels/Pretzels",
+        "dessert": "Bakery Products/Desserts",
     }
     for token, cuisine in cuisine_vocab.items():
         if token in lowered:
             desired_cuisines.add(cuisine)
+
+    premium_keywords = {
+        "romantic", "date", "dating", "anniversary", "fancy", "luxury", "upscale", "fine dining", "premium", "best", "top",
+        "business", "meeting", "celebration", "party", "birthday", "group"
+    }
+    is_premium_vibe = any(word in lowered for word in premium_keywords)
 
     return {
         "zipcode": matched_zipcode,
@@ -476,6 +524,7 @@ def _extract_query_intent(query):
         "has_location": bool(borough or neighborhood or matched_zipcode),
         "desired_price": desired_price,
         "desired_cuisines": desired_cuisines,
+        "is_premium_vibe": is_premium_vibe,
         "tokens": tokens,
         "lowered": lowered,
     }
@@ -488,22 +537,30 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
     intent = _extract_query_intent(query)
 
     semantic_scores = np.zeros(len(df))
+    semantic_norm = np.zeros(len(df))
     model = load_model()
     if embeddings is not None and model is not None:
         try:
             query_embedding = model.encode([expanded_query], normalize_embeddings=True)
-            semantic_scores = cosine_similarity(query_embedding, embeddings)[0]
+            similarities = np.dot(embeddings, query_embedding.T).squeeze()
+            semantic_scores = np.asarray(similarities, dtype=float)
+            # Scale similarities so the top match is boosted towards 0.85
+            # This prevents pure semantic queries (like "cozy") from being fully 
+            # blocked by the absolute min_match=0.55 threshold.
+            max_sim = similarities.max()
+            scale_factor = 0.85 / max(max_sim, 0.3)
+            semantic_norm = np.clip(similarities * scale_factor, 0, 1)
         except Exception:
-            semantic_scores = np.zeros(len(df))
+            semantic_norm = np.zeros(len(df))
 
-    semantic_norm = np.clip(semantic_scores, 0, 1)
     lexical_scores = df["description"].fillna("").apply(lambda text: lexical_score(query, text)).to_numpy()
     name_scores = df.get("dba", pd.Series([""] * len(df), index=df.index)).fillna("").apply(lambda text: lexical_score(query, text)).to_numpy()
-    cuisine_series = (
-        df.get("cuisine", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
-    )
+    cuisine_series = df.get("cuisine", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
     if "cuisine_type" in df.columns:
-        cuisine_series = cuisine_series.where(cuisine_series.str.strip() != "", df["cuisine_type"].fillna("").astype(str))
+        cuisine_series = cuisine_series.where(
+            cuisine_series.str.strip() != "",
+            df["cuisine_type"].fillna("").astype(str),
+        )
     borough_series = df.get("boro", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
     neighborhood_series = df.get("neighborhood", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
     zipcode_series = df.get("zipcode", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str).str[:5]
@@ -521,9 +578,14 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
 
     cuisine_boost = np.zeros(len(df))
     if intent["desired_cuisines"]:
-        cuisine_boost = cuisine_series.apply(
-            lambda value: 1.0 if any(target.lower() in str(value).lower() for target in intent["desired_cuisines"]) else 0.0
-        ).to_numpy()
+        cuisine_boost = np.array([
+            _cuisine_intent_match(
+                intent["desired_cuisines"],
+                cuisine_series.iloc[i],
+                f"{df['description'].iloc[i]} {summary_series.iloc[i]} {df['dba'].iloc[i]}",
+            )
+            for i in range(len(df))
+        ])
     cuisine_query_present = len(intent["desired_cuisines"]) > 0
     structured_intent_present = bool(
         intent["has_location"] or cuisine_query_present or intent["desired_price"] is not None
@@ -552,19 +614,9 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
 
     keyword_boost = np.zeros(len(df))
     if intent["tokens"]:
-        searchable_text = (
-            df.get("dba", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str).str.lower()
-            + " "
-            + cuisine_series.str.lower()
-            + " "
-            + borough_series.str.lower()
-            + " "
-            + neighborhood_series.str.lower()
-            + " "
-            + summary_series.str.lower()
-        )
+        searchable_text = df["description"].fillna("").astype(str)
         keyword_boost = searchable_text.apply(
-            lambda text: sum(token in text for token in intent["tokens"]) / max(len(intent["tokens"]), 1)
+            lambda text: _count_token_matches(intent["tokens"], text) / max(len(intent["tokens"]), 1)
         ).to_numpy()
 
     mask = np.ones(len(df), dtype=bool)
@@ -575,9 +627,12 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
     if min_rating > 0:
         mask &= pd.to_numeric(df.get("g_rating", 0), errors="coerce").fillna(0) >= min_rating
 
-    filtered_scores = np.where(
-        mask,
-        0.28 * semantic_norm
+    # Fix Hubness / Generic Bleed: Penalize restaurants with no Google summary in pure semantic searches
+    has_summary = df["g_summary"].notna() & (df["g_summary"].str.strip() != "")
+    adjusted_semantic_norm = semantic_norm * np.where(has_summary, 1.0, 0.6)
+
+    base_signal = (
+        0.28 * adjusted_semantic_norm
         + 0.16 * lexical_scores
         + 0.1 * name_scores
         + 0.08 * keyword_boost
@@ -585,9 +640,59 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
         + 0.18 * zipcode_boost
         + 0.16 * neighborhood_boost
         + 0.12 * borough_boost
-        + 0.05 * price_boost
-        + 0.03 * quality_scores
-        + 0.02 * profile_scores,
+    )
+    # Prevent pure semantic or pure exact-match queries from being over-diluted
+    # by taking the maximum of the weighted sum and the pure signals.
+    base_signal = np.maximum.reduce([
+        base_signal,
+        adjusted_semantic_norm,
+        lexical_scores * 0.85
+    ])
+
+    if intent.get("is_premium_vibe"):
+        quality_weight = 0.15
+        premium_penalty = np.where(pd.to_numeric(df.get("g_rating", 0), errors="coerce").fillna(0) < 4.2, -0.15, 0)
+        # Actively push $$$ and $$$$ restaurants to the top for dating/luxury queries
+        premium_penalty = premium_penalty + np.where(price_series >= 3, 0.25, 0)
+        premium_penalty = premium_penalty + np.where(price_series < 2, -0.15, 0)
+    else:
+        quality_weight = 0.03
+        premium_penalty = 0
+
+    # Institutional Penalty: penalize non-restaurants (catering, theater, hospital, equity) 
+    institutional_keywords = ["catering", "theatre", "theater", "equity", "hospital", "school", "university", "terminal", "stadium", "club", "eqx", "fitness", "center"]
+    is_institutional = df["dba"].fillna("").str.lower().apply(lambda x: any(k in x for k in institutional_keywords)).to_numpy()
+    institutional_penalty = np.where(is_institutional, -0.6, 0.0)
+
+    # Multiplicative Cascade & Base Boost for Explicit Intents
+    cascade_multiplier = np.ones(len(df))
+    intent_signal = np.zeros(len(df))
+    if intent["desired_price"] is not None:
+        if intent["desired_price"] <= 2:
+            cascade_multiplier *= np.where(price_series == 1, 1.5, np.where(price_series == 2, 1.2, np.where(price_series == 3, 0.5, 0.3)))
+            intent_signal = np.where(price_series == 1, 0.8, np.where(price_series == 2, 0.5, 0.0))
+            # Nuke low-quality fast food from 'cheap' searches
+            premium_penalty = premium_penalty + np.where(pd.to_numeric(df.get("g_rating", 0), errors="coerce").fillna(0) < 4.0, -0.4, 0.0)
+        else:
+            cascade_multiplier *= np.where(price_series >= 4, 1.5, np.where(price_series == 3, 1.2, np.where(price_series == 2, 0.5, 0.3)))
+            intent_signal = np.where(price_series >= 4, 0.8, np.where(price_series == 3, 0.5, 0.0))
+            # Nuke snacks/coffee shops from 'expensive' fine dining searches
+            snack_cuisines = ["Coffee/Tea", "Bakery Products/Desserts", "Juice, Smoothies, Fruit Salads", "Bagels/Pretzels", "Donuts", "Frozen Desserts"]
+            is_snack = df["cuisine"].isin(snack_cuisines).to_numpy()
+            premium_penalty = premium_penalty + np.where(is_snack, -0.5, 0.0)
+            
+            # Nuke suspicious luxury places (Google API glitch: cheap places tagged as $$$$ usually have ratings < 4.3)
+            suspicious_luxury = (price_series == 4) & (pd.to_numeric(df.get("g_rating", 0), errors="coerce").fillna(0) < 4.3)
+            premium_penalty = premium_penalty + np.where(suspicious_luxury, -0.6, 0.0)
+            
+            # Additional penalty for sneaky hotel/building locations
+            sneaky_hotels = ["hotel", "palace", "residence", "plaza"]
+            is_sneaky = df["dba"].fillna("").str.lower().apply(lambda x: any(k in x for k in sneaky_hotels)).to_numpy()
+            institutional_penalty = institutional_penalty + np.where(is_sneaky, -0.4, 0.0)
+
+    filtered_scores = np.where(
+        mask,
+        (base_signal + intent_signal + quality_weight * quality_scores + premium_penalty + institutional_penalty + 0.02 * profile_scores) * cascade_multiplier,
         -1.0,
     )
     strong_text_signal = np.maximum.reduce([lexical_scores, name_scores, keyword_boost])
@@ -607,9 +712,14 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
         | (strong_text_signal >= 0.34)
         | (cuisine_boost >= 1.0)
     )
+
+    if intent["desired_price"] is not None:
+        if intent["desired_price"] <= 2:
+            relevance_gate = relevance_gate | (price_series <= 2)
+        else:
+            relevance_gate = relevance_gate | (price_series >= 3)
+
     relevance_gate = relevance_gate & (query_signal >= 0.12)
-    if not structured_intent_present:
-        relevance_gate = relevance_gate & (strong_text_signal >= 0.12)
 
     if intent["has_location"]:
         relevance_gate = relevance_gate & (location_match >= 1.0)
@@ -640,5 +750,4 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
     ranked_indices = valid_indices[np.argsort(filtered_scores[valid_indices])[::-1][:top_k]]
     results = df.iloc[ranked_indices].copy()
     results["similarity"] = filtered_scores[ranked_indices]
-    results["match_percent"] = np.round(np.clip(results["similarity"], 0, 1) * 100).astype(int)
     return results.reset_index(drop=True)
