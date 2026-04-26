@@ -1,6 +1,8 @@
 # Project Checkpoint — NYC Restaurant Survival Guide
 **CSCI-UA 473 · Fundamentals of Machine Learning · Spring 2026**
 
+> Historical checkpoint note: this document records the early proposal/design checkpoint. It is kept for course-process context, but it is not the source of truth for the final demo. See [README.md](README.md) for the current implementation, algorithms, data files, and rubric-facing explanation.
+
 ## Part 1: Written Proposal
 
 **Problem Description**

@@ -10,10 +10,10 @@ from utils.search import neighborhood_from_zipcode
 PLACES_SEARCH = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 PLACES_DETAILS = "https://maps.googleapis.com/maps/api/place/details/json"
 PLACES_PHOTO = "https://maps.googleapis.com/maps/api/place/photo"
-DEFAULT_GOOGLE_API_KEY = "AIzaSyBM_Td0_NgsHAmjOldP7AVH5pySmZH--I8"
+
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 ENRICHED_CACHE_DIR = DATA_DIR / "cache"
-
+import os
 
 def get_google_api_key():
     try:
@@ -22,7 +22,7 @@ def get_google_api_key():
             return secret_value
     except Exception:
         pass
-    return DEFAULT_GOOGLE_API_KEY
+    return os.environ.get("GOOGLE_API_KEY", "")
 
 
 def _ensure_cache_dir():

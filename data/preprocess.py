@@ -96,12 +96,8 @@ def aggregate_per_restaurant(df):
  
 # Numerical features the MLP / Autoencoder will use
 NUMERICAL_FEATURES = [
-    "latest_score",
-    "avg_score",
-    "max_score",
     "num_inspections",
     "num_violations",
-    "critical_ratio",
     "violations_per_inspection",
 ]
  
