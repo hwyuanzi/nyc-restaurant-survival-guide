@@ -266,8 +266,9 @@ Recommendation uses explicit liked restaurants only:
 
 1. Each saved like is one positive example.
 2. The app retrieves cosine nearest neighbors for each liked restaurant in the 18-D restaurant feature space.
-3. Per-liked ranked lists are combined with Reciprocal Rank Fusion.
-4. Maximal Marginal Relevance reranks the candidates to balance relevance and diversity.
+3. Exact cuisine signals from liked history are applied before final ranking. For example, if most saved likes are Korean, Korean candidates are boosted above nearby Asian-family cuisines such as Chinese, Thai, or Japanese.
+4. Per-liked ranked lists are combined with Reciprocal Rank Fusion.
+5. Maximal Marginal Relevance reranks the candidates to balance relevance and diversity after the liked-cuisine signal has been applied.
 
 The recommendation algorithm is independent of cluster labels. The cluster view on the Recommendation page explains where liked restaurants and top picks sit in restaurant feature space; it does not assign the user to a cluster.
 
@@ -395,7 +396,7 @@ No. K-Means learns numeric cluster IDs. Human-readable labels are generated afte
 
 **Is recommendation based on the user's cluster?**
 
-No. Recommendations come from nearest neighbors around explicit liked restaurants, followed by RRF and MMR. Cluster visualizations are explanatory context only.
+No. Recommendations come from nearest neighbors around explicit liked restaurants, exact cuisine alignment learned from those likes, then RRF and MMR. Cluster visualizations are explanatory context only.
 
 **Is the health classifier predicting future grades?**
 

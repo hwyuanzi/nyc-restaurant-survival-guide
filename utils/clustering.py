@@ -1586,6 +1586,48 @@ def cuisine_alignment_score(profile: dict, cuisine_series: pd.Series,
     return np.ones(n, dtype=np.float32)
 
 
+def liked_history_cuisine_boost(
+    cuisine_series: pd.Series,
+    liked_metadata: list | None = None,
+    min_likes_for_dominant: int = 2,
+    dominant_threshold: float = 0.5,
+) -> np.ndarray:
+    """Boost exact cuisine matches learned from liked restaurants.
+
+    The clustering feature matrix intentionally uses broad cuisine families
+    (for example Korean, Chinese, Japanese, and Thai all map to Asian).  That is
+    useful for cluster visualization, but recommendations need a sharper signal:
+    if a user's liked history is mostly Korean, Korean candidates should outrank
+    neighboring Asian cuisines before MMR adds any diversity.
+    """
+    cuisines = cuisine_series.fillna("Other").astype(str).str.strip()
+    n = len(cuisines)
+    if not liked_metadata:
+        return np.ones(n, dtype=np.float32)
+
+    liked_cuisines = [
+        str(item.get("cuisine", "")).strip()
+        for item in liked_metadata
+        if str(item.get("cuisine", "")).strip()
+    ]
+    if not liked_cuisines:
+        return np.ones(n, dtype=np.float32)
+
+    liked_counts = pd.Series(liked_cuisines).value_counts(normalize=True)
+    if liked_counts.empty:
+        return np.ones(n, dtype=np.float32)
+
+    dominant_cuisine = str(liked_counts.index[0])
+    dominant_share = float(liked_counts.iloc[0])
+    if len(liked_cuisines) >= min_likes_for_dominant and dominant_share >= dominant_threshold:
+        exact_match = cuisines.eq(dominant_cuisine).to_numpy()
+        return np.where(exact_match, 3.0, 0.25).astype(np.float32)
+
+    liked_share = liked_counts.to_dict()
+    boost = cuisines.map(lambda cuisine: 1.0 + 1.5 * float(liked_share.get(cuisine, 0.0))).to_numpy()
+    return boost.astype(np.float32)
+
+
 # --------------------------------------------------------------------------
 # Per-liked KNN recommendation
 # --------------------------------------------------------------------------
@@ -1621,7 +1663,7 @@ def recommend_per_liked_knn(
     profile_scaled = _scaled_space(profile_vector, scaler)
     profile_sim = cosine_similarity(profile_scaled, X_scaled).flatten()
 
-    # --- Cuisine alignment based on profile ---
+    # --- Cuisine alignment based on profile / liked history ---
     if profile is not None:
         liked_ids_for_cuisine = {str(l.get("restaurant_id", ""))
                                  for l in profile.get("likes", [])
@@ -1633,7 +1675,10 @@ def recommend_per_liked_knn(
             profile, restaurant_df["cuisine_type"], liked_for_cuisine,
         )
     else:
-        cuisine_boost = np.ones(len(restaurant_df), dtype=np.float32)
+        cuisine_boost = liked_history_cuisine_boost(
+            restaurant_df["cuisine_type"],
+            liked_metadata=liked_metadata,
+        )
 
     # --- Fallback: no likes, rank by profile similarity alone (+ cuisine boost) ---
     if liked_vectors is None or len(liked_vectors) == 0:

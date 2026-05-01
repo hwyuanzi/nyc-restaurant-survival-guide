@@ -37,7 +37,8 @@ st.title("🔮 Personalized Recommendations")
 st.markdown(
     "Recommendations are learned from the restaurants you explicitly like. "
     "The model retrieves neighbors for each liked restaurant, fuses those rankings, "
-    "and reranks for diversity so the list reflects your actual saved history."
+    "boosts exact cuisines that dominate your liked history, and reranks for "
+    "diversity so the list reflects your actual saved history."
 )
 
 
@@ -314,7 +315,8 @@ st.markdown("---")
 st.subheader("Recommendation Settings")
 st.caption(
     "Per-liked KNN retrieves neighbors for each saved like, Reciprocal Rank Fusion "
-    "combines those lists, and MMR reranks the candidates for diversity."
+    "combines those lists, exact liked-cuisine alignment sharpens the ranking, "
+    "and MMR reranks the candidates for diversity."
 )
 mmr_lambda = st.slider(
     "MMR balance (λ)",
@@ -364,7 +366,8 @@ st.markdown("---")
 st.subheader("Recommended Restaurants")
 st.caption(
     "Restaurants are ranked from your liked restaurants only: per-liked cosine "
-    "neighbors in the 18-dim feature space are fused with RRF, then reranked by MMR. "
+    "neighbors in the 18-dim feature space are adjusted by exact cuisine patterns "
+    "from your likes, fused with RRF, then reranked by MMR. "
     "The *Influenced by* column shows which saved like contributed each pick's best rank."
 )
 
