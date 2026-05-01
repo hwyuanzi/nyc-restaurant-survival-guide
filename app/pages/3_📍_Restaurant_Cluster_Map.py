@@ -14,7 +14,7 @@ from utils.clustering import (
     find_silhouette_knee, find_inertia_elbow, CLUSTER_SCHEMA_VERSION,
 )
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
-from utils.user_profile import init_session_state, predict_user_cluster
+from utils.user_profile import init_session_state
 
 st.set_page_config(
     page_title="Restaurant Cluster Map",
@@ -145,9 +145,6 @@ with st.spinner(f"Running {algo_display}..."):
     st.session_state["scaler"]       = scaler
     st.session_state["pca_model"]    = pca
 
-predicted_cluster = predict_user_cluster(user_history, cdf, kmeans, scaler)
-st.session_state["predicted_cluster"] = predicted_cluster
-
 # ── Effective cluster count note ─────────────────────────────────────────────
 _n_effective = cdf["cluster_id"].nunique()
 if _n_effective < k:
@@ -156,13 +153,6 @@ if _n_effective < k:
         f"because the selected algorithm produced empty duplicate assignments. "
         f"No post-hoc cluster merging is applied."
     )
-
-# ── User cluster banner ───────────────────────────────────────────────────────
-if predicted_cluster != -1:
-    cl_label = cdf[cdf["cluster_id"] == predicted_cluster]["cluster_label"].iloc[0]
-    n_match  = len(cdf[cdf["cluster_id"] == predicted_cluster])
-    st.success(f"🎯 Based on your history, you belong to **{cl_label}** — {n_match} restaurants match your taste profile.")
-
 
 # ── K-selection analysis (shown after "Find Optimal K" is clicked) ────────────
 _k_scores = st.session_state.get("k_selection_scores")
@@ -278,7 +268,7 @@ if _k_scores:
             )})
         for _axis in ["yaxis", "yaxis2"]:
             _fig.update_layout(**{_axis: dict(gridcolor="#2a2a38")})
-        st.plotly_chart(_fig, use_container_width=True)
+        st.plotly_chart(_fig, width="stretch")
 
         _algo_display = {
             "kmeans": "K-Means (scratch NumPy)", "gmm": "GMM (tied covariance)",
@@ -352,12 +342,10 @@ else:
 # Cluster colors with dimming
 def get_color(cid):
     color = CLUSTER_COLORS[cid % len(CLUSTER_COLORS)].copy()
-    if predicted_cluster != -1 and cid != predicted_cluster:
-        return color[:3] + [60]
     return color
 
 map_df["cluster_color_rgba"] = map_df["cluster_id"].apply(get_color)
-map_df["scaled_radius"]      = map_df["cluster_id"].apply(lambda c: 80 if c == predicted_cluster else 40)
+map_df["scaled_radius"]      = 40
 
 # Elevation scaling
 h_col = height_metric if height_metric in map_df.columns else "avg_rating"

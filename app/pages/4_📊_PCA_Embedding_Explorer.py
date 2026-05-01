@@ -295,7 +295,7 @@ fig.update_layout(
 
 chart_key = f"pca_chart_{len(plot_df)}_{k}_{color_by}_{projection_mode}"
 try:
-    event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key=chart_key)
+    event = st.plotly_chart(fig, width="stretch", on_select="rerun", key=chart_key)
     if event and event.selection and event.selection.points:
         idx  = event.selection.points[0].get("point_index", 0)
         rest = plot_df.iloc[idx]
@@ -307,7 +307,7 @@ try:
         c3.metric("Cluster", rest.get("cluster_label", "—"))
         st.caption(f"📍 {rest.get('address', '')}")
 except Exception:
-    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    st.plotly_chart(fig, width="stretch", key=chart_key)
 
 # ── Clustering quality metrics ────────────────────────────────────────────────
 st.markdown("---")
@@ -429,7 +429,7 @@ if pca_model is not None and _feature_cols and pca_model.components_ is not None
                 ),
                 yaxis=dict(gridcolor="#2a2a38", autorange="reversed"),
             )
-            st.plotly_chart(_load_fig, use_container_width=True)
+            st.plotly_chart(_load_fig, width="stretch")
 
 # ── Explained variance bar ────────────────────────────────────────────────────
 if st.session_state["pca_model"] is not None:
@@ -460,7 +460,7 @@ if st.session_state["pca_model"] is not None:
         xaxis=dict(gridcolor="#2a2a38"),
         yaxis=dict(gridcolor="#2a2a38"),
     )
-    st.plotly_chart(bar_fig, use_container_width=True)
+    st.plotly_chart(bar_fig, width="stretch")
 
 # ── Cluster distance heatmap ──────────────────────────────────────────────────
 st.markdown("---")
@@ -498,7 +498,7 @@ heat_fig.update_layout(
     font=dict(color="#e0e0f0", size=11),
     xaxis=dict(tickangle=30),
 )
-st.plotly_chart(heat_fig, use_container_width=True)
+st.plotly_chart(heat_fig, width="stretch")
 
 # ── Cluster evidence panel ────────────────────────────────────────────────────
 st.markdown("---")
@@ -550,7 +550,7 @@ st.dataframe(
         "avg_rating": "Rating",
         "distance_to_centroid": "Distance to centroid",
     }),
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
@@ -571,4 +571,4 @@ st.caption(
     "Most restaurants in this dataset are between tier 1 and 2, so many clusters are naturally budget-to-mid-range rather than upscale."
 )
 st.dataframe(summary[["cluster_label", "Restaurants", "Avg_Rating", "Avg_Price_Tier", "Top_Cuisine", "Key_Drivers"]],
-             use_container_width=True, hide_index=True)
+             width="stretch", hide_index=True)

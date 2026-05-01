@@ -545,7 +545,7 @@ selection = st.dataframe(
         "dba": "Restaurant", "boro": "Borough",
         "cuisine_description": "Cuisine", "grade": "Actual Grade",
     }),
-    use_container_width=True, hide_index=True,
+    width="stretch", hide_index=True,
     selection_mode="single-row", on_select="rerun", height=300,
 )
  
@@ -646,7 +646,7 @@ with col_chart:
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font_family="Inter, -apple-system, sans-serif",
     )
-    st.plotly_chart(prob_fig, use_container_width=True)
+    st.plotly_chart(prob_fig, width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -784,7 +784,7 @@ with col_before_after:
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font_family="Inter, -apple-system, sans-serif",
     )
-    st.plotly_chart(compare_fig, use_container_width=True)
+    st.plotly_chart(compare_fig, width="stretch")
 
 with col_delta:
     st.metric("Edited Prediction", edited_grade, delta=f"from {pred_grade}")
@@ -810,7 +810,7 @@ driver_display["Grade A Reference"] = driver_display.apply(
 driver_display["Change in P(A)"] = driver_display["Delta P(A)"].map(lambda v: f"{v * 100:+.1f} pts")
 st.dataframe(
     driver_display[["Feature", "Current", "Grade A Reference", "Change in P(A)", "Actionable"]],
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
@@ -846,7 +846,7 @@ if pred_grade != "A" or true_grade != "A":
                 "Suggested target": f"{path['violations_per_inspection']:.2f}",
             },
         ])
-        st.dataframe(rec_rows, use_container_width=True, hide_index=True)
+        st.dataframe(rec_rows, width="stretch", hide_index=True)
         st.caption(
             f"Recommended targets hold borough, cuisine, and inspection history fixed.  "
             f"The counterfactual prediction is Grade {path_grade}; actual DOHMH grades still "
@@ -918,7 +918,7 @@ benchmark_df = pd.DataFrame([
     },
 ])
 st.markdown("**Benchmark against a majority-class baseline**")
-st.dataframe(benchmark_df, use_container_width=True, hide_index=True)
+st.dataframe(benchmark_df, width="stretch", hide_index=True)
 st.caption(
     "Because Grade A dominates the data, an always-A baseline can score high raw "
     "accuracy while completely missing B/C restaurants.  We emphasize macro F1, "
@@ -948,7 +948,7 @@ with col_cm:
         paper_bgcolor="rgba(0,0,0,0)",
         font_family="Inter, -apple-system, sans-serif",
     )
-    st.plotly_chart(cm_fig, use_container_width=True)
+    st.plotly_chart(cm_fig, width="stretch")
  
 with col_per_class:
     st.markdown("**Per-class performance**")
@@ -962,7 +962,7 @@ with col_per_class:
                 "F1": f"{report[g]['f1-score']:.2f}",
                 "Support": int(report[g]["support"]),
             })
-    st.dataframe(pd.DataFrame(per_class_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(per_class_rows), width="stretch", hide_index=True)
  
     st.caption(
         "A grades dominate the dataset (~90% of restaurants), so recall on B and C "
@@ -1009,7 +1009,7 @@ imp_fig.update_layout(
     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     font_family="Inter, -apple-system, sans-serif",
 )
-st.plotly_chart(imp_fig, use_container_width=True)
+st.plotly_chart(imp_fig, width="stretch")
  
 top_driver_name = importance_df.iloc[0]["Feature / group"]
 top_driver_drop = importance_df.iloc[0]["Metric Drop %"]

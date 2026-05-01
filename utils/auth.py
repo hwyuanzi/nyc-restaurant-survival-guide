@@ -123,7 +123,7 @@ def require_auth():
     with tab_login:
         login_username = st.text_input("Username", key="page_login_username")
         login_password = st.text_input("Password", type="password", key="page_login_password")
-        if st.button("Login", use_container_width=True, key="page_login_btn"):
+        if st.button("Login", width="stretch", key="page_login_btn"):
             success, profile_id = authenticate_user(login_username, login_password)
             if success:
                 st.session_state["authenticated_profile_id"] = profile_id
@@ -134,7 +134,7 @@ def require_auth():
     with tab_signup:
         signup_username = st.text_input("Choose a Username", key="page_signup_username")
         signup_password = st.text_input("Choose a Password", type="password", key="page_signup_password")
-        if st.button("Sign Up", use_container_width=True, key="page_signup_btn"):
+        if st.button("Sign Up", width="stretch", key="page_signup_btn"):
             success, result = register_user(signup_username, signup_password)
             if success:
                 st.success("Account created! Logging you in...")

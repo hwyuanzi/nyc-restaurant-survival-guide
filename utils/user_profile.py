@@ -416,7 +416,7 @@ def render_profile_sidebar():
 
     st.title(f"👤 Welcome, {active_name}")
     
-    if st.button("Logout", use_container_width=True):
+    if st.button("Logout", width="stretch"):
         st.session_state["authenticated_profile_id"] = None
         st.rerun()
 
@@ -449,7 +449,7 @@ def render_profile_sidebar():
         default=profile.get("favorite_vibes", []),
     )
 
-    if st.button("Save preferences", use_container_width=True):
+    if st.button("Save preferences", width="stretch"):
         profile = _persist_profile_updates(
             profile["id"],
             favorite_cuisines=favorite_cuisines,
@@ -471,7 +471,7 @@ def render_profile_sidebar():
         new_password = st.text_input("New password", type="password", key="account_new_password")
         confirm_password = st.text_input("Confirm new password", type="password", key="account_confirm_password")
 
-        if st.button("Update password", use_container_width=True):
+        if st.button("Update password", width="stretch"):
             if new_password != confirm_password:
                 st.error("New password and confirmation do not match.")
             else:
@@ -491,7 +491,7 @@ def render_profile_sidebar():
         ).strip()
         delete_password = st.text_input("Password for deletion", type="password", key="account_delete_password")
         delete_disabled = delete_confirm_name != profile["name"]
-        if st.button("Delete my profile", use_container_width=True, disabled=delete_disabled):
+        if st.button("Delete my profile", width="stretch", disabled=delete_disabled):
             from utils.auth import delete_user_account
 
             success, message = delete_user_account(profile["id"], delete_password)

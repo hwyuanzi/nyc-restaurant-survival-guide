@@ -49,7 +49,7 @@ if not st.session_state["authenticated_profile_id"]:
     with tab_login:
         login_username = st.text_input("Username", key="login_username")
         login_password = st.text_input("Password", type="password", key="login_password")
-        if st.button("Login", use_container_width=True):
+        if st.button("Login", width="stretch"):
             success, profile_id = authenticate_user(login_username, login_password)
             if success:
                 st.session_state["authenticated_profile_id"] = profile_id
@@ -60,7 +60,7 @@ if not st.session_state["authenticated_profile_id"]:
     with tab_signup:
         signup_username = st.text_input("Choose a Username", key="signup_username")
         signup_password = st.text_input("Choose a Password", type="password", key="signup_password")
-        if st.button("Sign Up", use_container_width=True):
+        if st.button("Sign Up", width="stretch"):
             success, result = register_user(signup_username, signup_password)
             if success:
                 st.success("Account created! Logging you in...")
@@ -86,7 +86,7 @@ def render_card(row, api_key, profile_name, rank):
     col_img, col_info = st.columns([1, 3])
     with col_img:
         if photo_ref and api_key:
-            st.image(build_photo_url(photo_ref, api_key), use_container_width=True)
+            st.image(build_photo_url(photo_ref, api_key), width="stretch")
         else:
             st.markdown("🍽️")
 
@@ -128,7 +128,7 @@ def render_card(row, api_key, profile_name, rank):
 with st.sidebar:
     profile = get_active_profile()
     st.title(f"👤 Welcome, {profile.get('name', 'Guest')}")
-    if st.button("Logout", use_container_width=True, key="main_logout"):
+    if st.button("Logout", width="stretch", key="main_logout"):
         st.session_state["authenticated_profile_id"] = None
         st.rerun()
 
@@ -153,10 +153,10 @@ with hero_left:
         """
         **Data** — 14,252 NYC DOHMH inspection records (train + test) enriched with 2,835 Google Places rows including ratings, reviews, price tier, and photos.
 
-        **ML algorithms implemented from scratch:**
+        **Course ML implementation:**
         - K-Means++ (`models/kmeans_scratch.py`) — default clustering engine
-        - PCA (`models/pca_scratch.py`) — used in classifier context plots
         - Custom MLP (`models/custom_mlp.py`) — 3-layer PyTorch health grade classifier
+        - PCA visualizations — cluster interpretation and feature loading analysis
 
         **Retrieval & recommendations:**
         - Semantic search via `sentence-transformers/all-mpnet-base-v2` + cosine similarity

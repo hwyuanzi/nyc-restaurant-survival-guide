@@ -2,10 +2,9 @@
 preprocess.py — NYC DOHMH Restaurant Inspection Data Preprocessing Pipeline
  
 Aggregates raw inspection rows into one row per restaurant, engineers numerical
-and categorical features, and produces train/test splits ready for the MLP and
-Autoencoder models.
+and categorical features, and produces train/test splits ready for the health
+grade MLP and Streamlit app.
  
-Author: Ryan Han (Data & DevOps)
 Course: CSCI-UA 473 · Fundamentals of Machine Learning · Spring 2026
 """
  
@@ -94,7 +93,7 @@ def aggregate_per_restaurant(df):
 # 2. Feature Engineering for Models
 # ---------------------------------------------------------------------------
  
-# Numerical features the MLP / Autoencoder will use
+# Numerical inspection-history features used by the health grade MLP
 NUMERICAL_FEATURES = [
     "num_inspections",
     "num_violations",
@@ -223,4 +222,3 @@ def preprocess_dohmh(input_path="data/raw_dohmh.csv", output_dir="data"):
  
 if __name__ == "__main__":
     preprocess_dohmh()
- 

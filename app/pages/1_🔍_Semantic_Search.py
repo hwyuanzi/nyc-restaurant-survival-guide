@@ -54,7 +54,7 @@ def render_card(row, api_key, profile_name, rank):
     col_img, col_info = st.columns([1, 3])
     with col_img:
         if photo_ref and api_key:
-            st.image(build_photo_url(photo_ref, api_key), use_container_width=True)
+            st.image(build_photo_url(photo_ref, api_key), width="stretch")
         else:
             st.markdown("🍽️")
 

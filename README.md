@@ -1,43 +1,69 @@
 # NYC Restaurant Survival Guide
 
-**CSCI-UA 473 — Fundamentals of Machine Learning**<br>
-New York University · Spring 2026
+**CSCI-UA 473 - Fundamentals of Machine Learning**
 
-An end-to-end Streamlit machine-learning dashboard for exploring NYC restaurants. The app combines real NYC Department of Health inspection data, Google Places metadata, semantic search embeddings, an inspection-risk classifier, interpretable clustering, PCA visualization, and liked-history recommendations.
+New York University, Spring 2026
 
-The submitted repo is designed to run as a working demo without live data downloads: the required processed CSVs, Google-enriched restaurant cache, embedding cache, model checkpoint, and clustering cache are included.
+NYC Restaurant Survival Guide is a Streamlit machine-learning app for exploring New York City restaurants. It combines real NYC Department of Health and Mental Hygiene inspection data, cached Google Places metadata, semantic search, a health-grade risk classifier, K-Means clustering from scratch, PCA-based cluster visualization, and personalized recommendations from saved liked restaurants.
+
+The repository is set up to run locally without API keys or live downloads. The prepared restaurant table, embedding matrix, classifier checkpoint, and clustering caches are committed so the demo can start from the submitted files.
 
 ---
 
-## Authors
+## Author
 
 | Name | GitHub |
 |---|---|
 | Hollan Yuan | [hwyuanzi](https://github.com/hwyuanzi) |
-| Ryan Han | [PapTR](https://github.com/PapTR) |
-| Rahul Adusumalli | [Rahuman-Noodles](https://github.com/Rahuman-Noodles) |
-| Muqiao Tao | [taomuqiao](https://github.com/taomuqiao) |
-| Jaiden Xu | [jbx202](https://github.com/jbx202) |
 
 ---
 
-## Quick Start
+## Project Checklist
+
+| Requirement area | How this repository addresses it |
+|---|---|
+| Working app | `app/Main.py` is the Streamlit entry point. The app has five navigable pages and loads from committed caches by default. |
+| Real dataset and meaningful task | The project uses NYC DOHMH inspection data plus Google Places metadata to answer user-facing questions about restaurant discovery, health-risk signals, restaurant segments, and liked-history recommendations. |
+| Course algorithm implementation | `models/kmeans_scratch.py` implements K-Means++ directly in NumPy, including initialization, assignment, centroid updates, empty-cluster handling, convergence, and multi-start model selection. |
+| ML coherence | Semantic retrieval, health-grade classification, clustering, PCA visualization, K selection, and recommendation reranking all operate on documented data representations. |
+| Usability | Pages include labeled controls, constrained filters, cached runtime assets, error messages for missing data, and a login/profile flow for saving likes. |
+| Repository hygiene | Active code is under `app/`, `models/`, `utils/`, `data/`, and `tests/`. Obsolete checkpoint-only modules and old cache files have been removed. |
+
+---
+
+## Install And Run
+
+### 1. Clone The Repository
 
 ```bash
 git clone https://github.com/hwyuanzi/nyc-restaurant-survival-guide.git
 cd nyc-restaurant-survival-guide
+```
 
-python -m venv .venv
-source .venv/bin/activate        # macOS / Linux
-# .venv\Scripts\activate         # Windows PowerShell
+### 2. Create A Python Environment
 
+Python 3.11+ is recommended. The project has also been smoke-tested in the local Python 3.14 environment used during development.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+### 3. Start The App
+
+```bash
 streamlit run app/Main.py
 ```
 
-Open `http://localhost:8501`, sign up or log in, then use the sidebar navigation.
+Open the local URL shown by Streamlit, usually:
 
-Optional Pipenv workflow:
+```text
+http://localhost:8501
+```
+
+### 4. Optional Pipenv Workflow
 
 ```bash
 pip install pipenv
@@ -45,28 +71,17 @@ pipenv install
 pipenv run streamlit run app/Main.py
 ```
 
-The app can run without a Google Places API key because `data/cache/prepared_search_v4_3800.pkl` and `data/cache/embeddings_prepared_v4_3800_2835.npy` are committed. A Google key is only needed if you intentionally rebuild the enrichment cache.
-
 ---
 
-## Rubric Readiness
+## Step-By-Step App Use
 
-| Rubric item | Project status |
-|---|---|
-| **Working Demo — 10%** | The app launches from `app/Main.py`, uses committed caches by default, handles missing external APIs with cache fallback, and has five navigable Streamlit pages. |
-| **Algorithm Implementation — 10%** | `models/kmeans_scratch.py` implements K-Means++ from scratch in NumPy and is the default algorithm used by the Restaurant Cluster GIS Map. `models/pca_scratch.py` is also implemented from scratch and used in the Health Grade Classifier context plot. |
-| **Data/task meaningfulness — 3 pts** | Uses real NYC DOHMH inspection data and Google Places metadata. User-facing tasks are plausible: search restaurants, inspect health-risk signals, discover restaurant segments, and get recommendations from saved likes. |
-| **UI/UX clarity — 3 pts** | Pages are labeled, sidebar controls are constrained, bad inputs show `st.info`/`st.warning`/`st.error`, and expensive data/model work is cached. |
-| **Technical correctness — 4 pts** | K-Means, MLP classification, PCA projection, semantic cosine retrieval, K selection, permutation importance, and MMR/RRF recommendation are used coherently and exposed in the UI. |
-| **Code quality deductions** | Main active code is under `app/`, `models/`, `utils/`, `data/`, and `tests/`. Obsolete root-level Streamlit pages were removed to avoid demo confusion. Tests pass. |
-
-Current verification command:
-
-```bash
-pipenv run pytest tests/test_semantic_search.py tests/test_custom_mlp.py tests/test_autoencoder.py
-```
-
-Expected result: **10 tests passing**.
+1. **Log in or create an account.** User accounts are stored locally in `data/user_profiles.json`; no external authentication service is used.
+2. **Start on the Home page.** Try one of the suggested restaurant queries, review the result cards, and click "Like this restaurant" on places you would actually want.
+3. **Open Semantic Search.** Use natural language such as `cozy Italian pasta in Brooklyn`, `late night ramen Manhattan`, or `cheap Caribbean food Bronx`. The page uses cached sentence embeddings when available and falls back gracefully if the embedding model cannot load.
+4. **Open Health Grade Risk Classifier.** Select a held-out restaurant, inspect predicted A/B/C risk probabilities, change inspection-pattern inputs, and review feature importance plus the constrained "Path to A" analysis.
+5. **Open Restaurant Cluster GIS Map.** View restaurants colored by learned cluster on an NYC map. The default clustering path uses the NumPy K-Means++ implementation; GMM and Ward are included as comparison baselines.
+6. **Open PCA Embedding Explorer.** Inspect the same clusters in 3D PCA, centroid-distance view, or t-SNE; use the feature loading and prototype panels to explain what separates clusters.
+7. **Open Personalized Recommendations.** Add or remove liked restaurants in the sidebar. Recommendations are generated from liked-history nearest neighbors, RRF fusion, and MMR diversity reranking. The cluster visualization on this page is explanatory context, not a "you belong to this cluster" rule.
 
 ---
 
@@ -74,78 +89,85 @@ Expected result: **10 tests passing**.
 
 | Page | What it does | Main ML concept |
 |---|---|---|
-| **Home / Landing Search** | Login/signup, cached restaurant search, like/unlike restaurants. | Embedding search + profile persistence |
-| **Semantic Search** | Natural-language restaurant search with a clean query-first interface. | Transformer embeddings + cosine similarity |
-| **Health Grade Risk Classifier** | Select a held-out DOHMH restaurant, view A/B/C risk probabilities, edit integer inspection-pattern features, inspect permutation importance, and search for a realistic path toward Grade A. | PyTorch MLP classifier + class-weighted cross entropy |
-| **Restaurant Cluster GIS Map** | Run K-Means/GMM/Ward on an 18-D interpretable feature space and view clusters on a real NYC map. | K-Means from scratch + clustering baselines |
-| **PCA Embedding Explorer** | View the same clusters in 3D PCA, cleaner centroid-distance view, or t-SNE visualization; inspect feature loadings, cluster distances, prototypes, and summary stats. | PCA projection + cluster interpretation |
-| **Recommendations** | Add/remove liked restaurants and get recommendations from liked history only. | Per-liked KNN + Reciprocal Rank Fusion + MMR |
+| Home / Landing Search | Login/signup, cached restaurant search, like/unlike restaurants. | Embedding search + profile persistence |
+| Semantic Search | Natural-language restaurant search with cuisine, location, price, and quality guardrails. | Transformer embeddings + cosine similarity |
+| Health Grade Risk Classifier | Held-out DOHMH restaurant classification, feature editing, model diagnostics, and path-to-A search. | Custom PyTorch MLP + class-weighted cross entropy |
+| Restaurant Cluster GIS Map | Cluster restaurants on an 18-D feature space and view clusters on an NYC map. | K-Means++ from scratch; GMM/Ward baselines |
+| PCA Embedding Explorer | 3D PCA, centroid-distance space, t-SNE, feature loadings, distances, summaries, and prototypes. | PCA visualization + cluster interpretation |
+| Recommendations | Personalized restaurant picks from explicit likes. | Per-liked KNN + Reciprocal Rank Fusion + MMR |
 
 ---
 
-## Data
+## Data And Cache Files
 
-### NYC DOHMH Inspection Data
+### DOHMH Classifier Data
 
-| Property | Value |
-|---|---|
-| Source | NYC OpenData, Department of Health and Mental Hygiene |
-| Endpoint | `https://data.cityofnewyork.us/resource/43nn-pn8j.csv` |
-| Raw granularity | One row per inspection violation |
-| Processed classifier rows | `11,401` train restaurants + `2,851` held-out test restaurants |
-| Class labels | `A`, `B`, `C` mapped to `0`, `1`, `2` |
-| Current train distribution | A: `9,235`, B: `1,396`, C: `770` |
-| Current test distribution | A: `2,310`, B: `349`, C: `192` |
+The classifier data comes from NYC OpenData's DOHMH restaurant inspection dataset:
 
-`data/preprocess.py` aggregates raw violation rows to one restaurant profile per `camis`, keeps the latest DOHMH grade as the target, and writes:
+```text
+https://data.cityofnewyork.us/resource/43nn-pn8j.csv
+```
 
-- `data/train.csv`
-- `data/test.csv`
-- `data/meta_train.csv`
-- `data/meta_test.csv`
-- `data/feature_config.json`
+`data/preprocess.py` aggregates raw inspection-violation rows into one row per restaurant, keeps the latest grade as the label, engineers features, and writes:
 
-The classifier currently uses **25 features**:
+| File | Shape | Purpose |
+|---|---:|---|
+| `data/train.csv` | `11,401 x 26` | Classifier training rows and target |
+| `data/test.csv` | `2,851 x 26` | Held-out classifier test rows and target |
+| `data/meta_train.csv` | `11,401 x 8` | Restaurant metadata for train rows |
+| `data/meta_test.csv` | `2,851 x 8` | Restaurant metadata for held-out UI selection |
+| `data/feature_config.json` | config | Feature names, label mapping, scaler statistics |
 
-- 3 standardized numeric inspection-history features:
-  `num_inspections`, `num_violations`, `violations_per_inspection`
-- 6 borough one-hot features:
-  `boro_0`, `boro_Bronx`, `boro_Brooklyn`, `boro_Manhattan`, `boro_Queens`, `boro_Staten Island`
-- 16 cuisine one-hot features:
-  top-15 cuisine categories plus `cuisine_Other`
+The health classifier uses 25 input features:
 
-Score-derived columns such as `latest_score`, `avg_score`, `max_score`, and `critical_ratio` are intentionally excluded from the final classifier feature set because DOHMH grades are derived from inspection score thresholds. Keeping them produced label leakage.
+- `num_inspections`, `num_violations`, `violations_per_inspection`
+- borough one-hot features
+- top cuisine one-hot features plus `cuisine_Other`
 
-### Google-Enriched Restaurant Cache
+Score-derived columns such as `latest_score`, `avg_score`, `max_score`, and `critical_ratio` are intentionally excluded because DOHMH grades are derived from inspection score thresholds. Keeping them would leak the label.
 
-| File | Purpose |
-|---|---|
-| `data/cache/prepared_search_v4_3800.pkl` | Cached Google-enriched restaurant table, currently `2,835` rows |
-| `data/cache/embeddings_prepared_v4_3800_2835.npy` | Cached 768-D sentence-transformer embeddings for the prepared restaurants |
-| `data/cluster_cache.parquet` | Cached clustered restaurant table |
-| `data/kmeans_model.joblib` | Cached K-Means model, scaler, and PCA artifacts |
+### Prepared Search And Demo Cache
 
-At runtime, `utils/search_assets.py` first tries the committed cache, then falls back to live DOHMH/Google rebuild only if requested.
+These files are intentionally committed for a reliable local demo:
+
+| File | Shape / size | Purpose |
+|---|---:|---|
+| `data/cache/prepared_search_v4_3800.pkl` | `2,835 x 24` | Main Google-enriched restaurant table used by search, clustering, PCA, and recommendations |
+| `data/cache/embeddings_prepared_v4_3800_2835.npy` | `2,835 x 768` | Cached `all-mpnet-base-v2` restaurant embeddings |
+| `data/cache/enriched_restaurants_3800.pkl` | `3,401 x 22` | Intermediate Google Places enrichment cache |
+| `data/cache/health_classifier.pt` | checkpoint | Trained PyTorch classifier weights |
+| `data/cache/health_classifier_history.json` | history | Training and validation loss/F1 history |
+| `data/cache/health_classifier_importance.json` | importance | Cached permutation-importance output |
+| `data/cluster_cache.parquet` | `2,835 x 48` | K-Means clustered restaurant table |
+| `data/kmeans_model.joblib` | model cache | K-Means model, scaler, and PCA artifacts |
+| `data/cluster_cache_gmm.parquet` | `2,835 x 48` | GMM baseline clustered table |
+| `data/cluster_model_gmm.joblib` | model cache | GMM baseline artifacts |
+| `data/cluster_cache_agglo.parquet` | `2,835 x 48` | Ward/agglomerative baseline clustered table |
+| `data/cluster_model_agglo.joblib` | model cache | Ward/agglomerative baseline artifacts |
+
+Earlier experimental caches, including old v3 prepared search files, partial v4 embedding files, and hyperparameter-search JSON output, are not needed for the final app and have been removed from the active repository state.
+
+### Dataset Size Choice
+
+The prepared search sample starts from `3,800` candidate restaurants and keeps `2,835` restaurants after Google enrichment and validity filters. A larger prepared dataset could improve search and recommendation coverage, especially for rare cuisines and neighborhoods. For the submitted project, the cache size is deliberately moderate so the repository stays lightweight, starts quickly on a local laptop, and still lets users rebuild a larger local cache from NYC DOHMH plus Google Places if they want more coverage.
 
 ---
 
 ## Models And Algorithms
 
-### 1. Semantic Search
+### Semantic Search
 
-Implemented in `utils/search.py`.
+Implemented in `utils/search.py` and used by `app/Main.py` plus `app/pages/1_🔍_Semantic_Search.py`.
 
-- Text descriptions combine restaurant name, cuisine, borough/neighborhood, Google summary, rating, price, health grade, and address.
-- Embeddings use `sentence-transformers/all-mpnet-base-v2` when available.
-- Query and restaurant vectors are L2-normalized, so cosine ranking is a dot product.
-- Cuisine and neighborhood query hints add guardrails for terms like `pho`, `Vietnamese`, `romantic French bistro`, and borough/neighborhood phrases.
-- The UI no longer shows misleading match percentages; users see ranked restaurant cards instead.
+- Restaurant descriptions combine name, cuisine, borough/neighborhood, address, Google summary, rating, price tier, and health-grade information.
+- Cached embeddings use `sentence-transformers/all-mpnet-base-v2`.
+- Query and restaurant vectors are L2-normalized, so cosine similarity is computed as a dot product.
+- Structured guardrails for cuisine, borough/neighborhood, price, and quality keep explicit user intent from being overwhelmed by generic semantic matches.
+- If the embedding model is unavailable, the search code falls back to lexical and structured scoring instead of crashing.
 
-### 2. Health Grade Risk Classifier
+### Health Grade Risk Classifier
 
 Implemented in `models/custom_mlp.py` and `app/pages/2_🧪_Health_Grade_Classifier.py`.
-
-Architecture:
 
 ```text
 Input(25)
@@ -154,16 +176,14 @@ Input(25)
   -> Linear(128, 3)
 ```
 
-Training:
+Training details:
 
-- Optimizer: AdamW
-- Loss: class-weighted `CrossEntropyLoss`
-- Validation split: 20% of training data, stratified
-- Early stopping: validation weighted F1, patience 12
-- Checkpoint: `data/cache/health_classifier.pt`
-- History: `data/cache/health_classifier_history.json`
+- PyTorch model and training loop implemented directly with `torch.nn`, `DataLoader`, AdamW, and class-weighted cross entropy.
+- Stratified validation split is taken from the training data.
+- Early stopping monitors validation weighted F1.
+- The page reports held-out accuracy/F1, majority baseline, confusion matrix, per-class metrics, permutation importance, local sensitivity, and path-to-A feature edits.
 
-Current held-out test metrics:
+Current held-out metrics from the committed checkpoint:
 
 | Metric | Value |
 |---|---:|
@@ -171,92 +191,54 @@ Current held-out test metrics:
 | Weighted F1 | `0.708` |
 | Macro F1 | `0.394` |
 
-Per-class behavior is intentionally shown in the app because the DOHMH labels are imbalanced. Grade A dominates, while B/C are rarer and harder. The page frames predictions as **risk signals**, not official future-grade forecasts.
+The classifier is presented as an inspection-risk signal, not an official future-grade forecast.
 
-Explainability:
+### K-Means++ From Scratch
 
-- Permutation importance shows which input groups affect weighted F1.
-- What-if controls use integer inspection counts, not fractional counts.
-- `violations_per_inspection` is derived from total violations and inspection count.
-- The constrained "Path to A" search lowers actionable violation count while holding inspection history fixed.
-- A 2D PCA context map uses `models/pca_scratch.PCAScratch`.
+Implemented in `models/kmeans_scratch.py` and used as the default clustering algorithm in `utils/clustering.py`.
 
-### 3. K-Means Clustering From Scratch
+This is the primary non-wrapper course algorithm implementation. It is not scikit-learn K-Means.
 
-Implemented in `models/kmeans_scratch.py`; used by default in `utils/clustering.py` and the Restaurant Cluster GIS Map.
+The implementation includes:
 
-Algorithm details:
-
-1. K-Means++ centroid initialization.
-2. Vectorized Euclidean assignment step.
+1. K-Means++ initialization.
+2. Vectorized Euclidean assignment.
 3. Centroid update by cluster means.
-4. Empty cluster reinitialization to a random data point.
-5. Convergence by unchanged labels or centroid shift below `tol`.
-6. Multi-start `n_init`; keep the lowest inertia run.
+4. Empty-cluster reinitialization.
+5. Convergence by unchanged labels or centroid shift tolerance.
+6. Multi-start `n_init` with lowest-inertia model selection.
 
-This directly satisfies the course requirement for a non-wrapper algorithm implementation. The app also exposes GMM and Ward clustering as comparison baselines, but the default demo path uses the NumPy K-Means implementation.
+The clustering feature matrix has 18 interpretable dimensions:
 
-Clustering feature space:
+- price tier, Google rating, log review count, inverted DOHMH score, latitude, longitude
+- cuisine group one-hot features: American, Asian, Latin, Cafe, Italian, European, Other
+- borough one-hot features: Manhattan, Brooklyn, Queens, Bronx, Staten Island
 
-- 6 numeric features:
-  price tier, Google rating, log review count, inverted DOHMH score, latitude, longitude
-- 7 cuisine group one-hot features:
-  American, Asian, Latin, Cafe, Italian, European, Other
-- 5 borough one-hot features:
-  Manhattan, Brooklyn, Queens, Bronx, Staten Island
+Features are standardized before K-Means, so Euclidean distance is more meaningful across mixed scales. GMM and Ward/agglomerative clustering are included only as comparison baselines on the same feature matrix.
 
-Total: **18 interpretable dimensions**.
+### PCA And Cluster Interpretation
 
-Current default K selection:
+Implemented in `utils/clustering.py` and `app/pages/4_📊_PCA_Embedding_Explorer.py`.
 
-- The app sweeps K=4..15.
-- It tracks silhouette score, inertia, and largest-cluster share.
-- It chooses a conservative K from the silhouette knee and K-Means elbow logic.
-- Current prepared cache result: **K = 9**, displayed as 9 clusters.
-- Small niche clusters are kept, so selected K and displayed cluster count match.
+PCA is used for visualization and explanation; the scratch-implementation requirement is satisfied by `models/kmeans_scratch.py`. The app shows:
 
-Cluster labels:
+- 3D PCA projection of the standardized clustering feature matrix
+- centroid-distance PCA view for cleaner cluster separation
+- optional t-SNE visualization
+- component loadings, explained variance, cluster distance matrix, cluster summaries, and prototype restaurants
 
-K-Means only outputs numeric `cluster_id`s. Human-readable labels are generated afterward from cluster summaries:
+### Personalized Recommendations
 
-- dominant cuisine group when one exists,
-- otherwise borough concentration,
-- otherwise price tier and rating/review persona.
+Implemented in `app/pages/5_🔮_Recommendations.py` and helper functions in `utils/clustering.py`.
 
-Therefore labels such as `American`, `Asian`, `Cafe`, `European · Mid-Range`, and `Mid-Range · Highly Rated` are interpretations of learned clusters, not manual assignments.
+Recommendation uses explicit liked restaurants only:
 
-### 4. PCA And Embedding Explorer
+1. Each saved like is one positive example.
+2. The app retrieves cosine nearest neighbors for each liked restaurant in the 18-D restaurant feature space.
+3. Per-liked ranked lists are combined with Reciprocal Rank Fusion.
+4. Maximal Marginal Relevance reranks the candidates to balance relevance and diversity.
 
-Implemented in `app/pages/4_📊_PCA_Embedding_Explorer.py`.
-
-The clustering model is trained in higher-dimensional standardized feature space. The 3D plots are visualizations:
-
-- **Principal Components**: direct 3D PCA projection of the scaled 18-D feature matrix.
-- **Cleaner Cluster View**: PCA projection of each restaurant's distances to all centroids, useful for seeing separation.
-- **t-SNE**: optional visualization only; not used for cluster assignment.
-
-The page includes:
-
-- feature loading charts,
-- explained variance,
-- cluster distance matrix,
-- cluster evidence panel,
-- prototype restaurants nearest the centroid,
-- price tier formatting as `1..4`, where `1=$` and `4=$$$$`.
-
-### 5. Personalized Recommendations
-
-Implemented in `app/pages/5_🔮_Recommendations.py` and `utils/clustering.py`.
-
-Recommendation is now based only on restaurants the user explicitly likes:
-
-1. User adds/removes liked restaurants in the Recommendation sidebar or likes restaurants from search cards.
-2. Each liked restaurant is treated as one equal positive example.
-3. For each liked restaurant, the app retrieves cosine nearest neighbors in the same 18-D restaurant feature space.
-4. Per-liked ranked lists are fused with Reciprocal Rank Fusion (RRF).
-5. The top candidates are reranked with Maximal Marginal Relevance (MMR) for diversity.
-
-Cluster membership is shown only as context. The recommender is not "recommend everything from my cluster"; it recommends nearby restaurants around the user's liked examples and can return candidates from any cluster.
+The recommendation algorithm is independent of cluster labels. The cluster view on the Recommendation page explains where liked restaurants and top picks sit in restaurant feature space; it does not assign the user to a cluster.
 
 ---
 
@@ -265,7 +247,7 @@ Cluster membership is shown only as context. The recommender is not "recommend e
 ```text
 nyc-restaurant-survival-guide/
 ├── app/
-│   ├── main.py
+│   ├── Main.py
 │   ├── ui_utils.py
 │   └── pages/
 │       ├── 1_🔍_Semantic_Search.py
@@ -279,24 +261,18 @@ nyc-restaurant-survival-guide/
 │   ├── train.csv / test.csv
 │   ├── meta_train.csv / meta_test.csv
 │   ├── feature_config.json
-│   ├── cluster_cache.parquet
-│   ├── kmeans_model.joblib
+│   ├── cluster caches and model caches
 │   └── cache/
 │       ├── prepared_search_v4_3800.pkl
 │       ├── embeddings_prepared_v4_3800_2835.npy
-│       ├── health_classifier.pt
-│       ├── health_classifier_history.json
-│       └── hp_search_results.json
+│       ├── enriched_restaurants_3800.pkl
+│       └── health classifier artifacts
 ├── models/
-│   ├── autoencoder.py
 │   ├── custom_mlp.py
-│   ├── kmeans_scratch.py
-│   └── pca_scratch.py
-├── retrieval/
-│   └── vector_search.py
+│   └── kmeans_scratch.py
 ├── tests/
-│   ├── test_autoencoder.py
 │   ├── test_custom_mlp.py
+│   ├── test_kmeans_scratch.py
 │   └── test_semantic_search.py
 ├── utils/
 │   ├── auth.py
@@ -311,27 +287,37 @@ nyc-restaurant-survival-guide/
 └── README.md
 ```
 
-Primary Streamlit entry point: `app/Main.py`.
-
 ---
 
-## Rebuilding Data
+## Rebuild Or Expand The Data
 
-The submitted cache is enough for the live demo. To rebuild from raw DOHMH data:
+The submitted app does not expose a Streamlit "refresh data" button. Rebuilding is a terminal workflow.
+
+### Rebuild DOHMH Classifier Splits
 
 ```bash
-pipenv run python data/download_data.py 50000
-pipenv run python data/preprocess.py
+source .venv/bin/activate
+python data/download_data.py 50000
+python data/preprocess.py
 ```
 
-To rebuild Google Places enrichment, add an API key:
+This rewrites `data/train.csv`, `data/test.csv`, `data/meta_train.csv`, `data/meta_test.csv`, and `data/feature_config.json`. If the classifier checkpoint is deleted, the Health Grade Risk Classifier page can retrain and save a new `data/cache/health_classifier.pt` from those files.
 
-```toml
-# .streamlit/secrets.toml
-GOOGLE_API_KEY = "your_key_here"
+### Rebuild Google-Enriched Search Cache
+
+Set a Google Places key either in the environment or in `.streamlit/secrets.toml`:
+
+```bash
+export GOOGLE_API_KEY="your_key_here"
 ```
 
-Then use the refresh checkbox in the app or call the cache loaders directly.
+Then run:
+
+```bash
+python -c "from utils.search_assets import load_prepared_search_assets, DEFAULT_SEARCH_SAMPLE_SIZE; load_prepared_search_assets(DEFAULT_SEARCH_SAMPLE_SIZE, force_refresh=True)"
+```
+
+To try a larger local prepared cache, edit `DEFAULT_SEARCH_SAMPLE_SIZE` in `utils/search_assets.py` or call `load_prepared_search_assets(sample_size=YOUR_SIZE, force_refresh=True)`. Larger samples improve coverage but require more Google API calls, more embedding time, and larger cache files.
 
 ---
 
@@ -339,27 +325,44 @@ Then use the refresh checkbox in the app or call the cache loaders directly.
 
 ```bash
 pipenv run pytest tests/ -v
-python -m py_compile app/Main.py app/pages/*.py utils/*.py models/*.py
+python3 -m py_compile app/Main.py app/pages/*.py utils/*.py models/*.py
 ```
 
-Current test coverage:
+Current test coverage checks:
 
-- MLP forward/training behavior,
-- Autoencoder shape/loss/latent output,
-- Semantic search embedding shape, normalization, and relevance behavior.
+- K-Means++ fit, predict, and distance-transform behavior
+- Custom MLP forward pass and training loop behavior
+- Semantic search fallback and borough-filter behavior without downloading a model
+
+During repository review, the Streamlit pages were also smoke-tested with `streamlit.testing.v1.AppTest`; all app entry points loaded with zero page exceptions.
 
 ---
 
-## Presentation Notes
+## Common Questions
 
-Useful answers for common grading questions:
+**Which part is implemented from scratch?**
 
-- **Why K-Means?** It is a course algorithm, implemented from scratch, easy to explain, and appropriate after standardizing the interpretable feature space.
-- **What does K mean?** K is the requested number of clusters. The current app keeps K displayed clusters rather than merging small groups.
-- **Are cluster labels learned directly?** No. The algorithm learns numeric cluster IDs; labels are generated afterward from cluster summary statistics.
-- **Why are many prices mid-range?** Google price tier is 1..4, and this sample is concentrated between 1 and 2. That is a data distribution fact, not a labeling bug.
-- **Is Recommendation based on cluster?** No. It uses per-liked nearest neighbors in the 18-D feature space, then RRF and MMR. Cluster is context only.
-- **Is the health classifier predicting the future?** No. It classifies current/held-out restaurant inspection profiles into A/B/C risk categories. A true future-grade model would need time-sliced inspection histories.
+The K-Means++ algorithm in `models/kmeans_scratch.py` is implemented directly in NumPy and is the default clustering engine shown in the app.
+
+**Why use Euclidean distance for K-Means?**
+
+The restaurant feature matrix is standardized before clustering, so price, rating, review count, health score, cuisine indicators, borough indicators, and location features are put on comparable scales.
+
+**Are cluster labels learned directly?**
+
+No. K-Means learns numeric cluster IDs. Human-readable labels are generated afterward from cluster summary statistics such as cuisine group, borough concentration, price, rating, and review volume.
+
+**Is recommendation based on the user's cluster?**
+
+No. Recommendations come from nearest neighbors around explicit liked restaurants, followed by RRF and MMR. Cluster visualizations are explanatory context only.
+
+**Is the health classifier predicting future grades?**
+
+No. It classifies held-out restaurant inspection profiles into A/B/C risk categories. A true future-grade model would require time-sliced historical inspection data.
+
+**Why is the prepared restaurant dataset not larger?**
+
+A larger prepared dataset would likely improve search and recommendation coverage. The committed dataset is intentionally moderate so the repo stays lightweight, runs quickly, and remains reproducible without forcing every local setup to fetch thousands of Google Places records.
 
 ---
 

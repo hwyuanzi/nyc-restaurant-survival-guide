@@ -5,16 +5,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 
 from app.ui_utils import apply_apple_theme
-from utils.clustering import CLUSTER_SCHEMA_VERSION, get_clustered_data
+from utils.clustering import (
+    apply_mmr,
+    build_feature_matrix,
+    collect_liked_vectors,
+    get_clustered_data,
+    prepare_clustering_space,
+    recommend_per_liked_knn,
+)
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
 from utils.user_profile import (
     get_profile,
     get_valid_borough_options,
     get_valid_cuisine_options,
     init_session_state,
-    predict_user_cluster,
     profile_to_user_history,
     upsert_profile,
 )
@@ -40,14 +47,6 @@ def format_price_tier(value, escape_dollars=False):
         return "—"
     price_text = "$" * int(round(float(numeric_value)))
     return price_text.replace("$", r"\$") if escape_dollars else price_text
-
-
-def format_price_tier_mean(value):
-    numeric_value = pd.to_numeric(value, errors="coerce")
-    if pd.isna(numeric_value):
-        return "N/A"
-    nearest_tier = int(np.clip(round(float(numeric_value)), 1, 4))
-    return f"{float(numeric_value):.2f} / 4 (~{'$' * nearest_tier})"
 
 
 def build_restaurant_option(row):
@@ -128,7 +127,7 @@ with st.sidebar:
     st.session_state["active_profile_id"] = profile["id"]
     st.session_state["user_history"] = profile_to_user_history(profile, raw_df)
     st.title(f"👤 Welcome, {profile.get('name', 'Guest')}")
-    if st.button("Logout", use_container_width=True, key="recommendations_logout"):
+    if st.button("Logout", width="stretch", key="recommendations_logout"):
         st.session_state["authenticated_profile_id"] = None
         st.rerun()
     st.caption("This page ranks restaurants from liked history only. Profile preference sliders are intentionally not used here.")
@@ -198,7 +197,7 @@ with st.sidebar:
     else:
         st.caption("No matching restaurants found for the current search.")
 
-    if st.button("Add liked restaurant", use_container_width=True, disabled=not selected_restaurant_id):
+    if st.button("Add liked restaurant", width="stretch", disabled=not selected_restaurant_id):
         selected_row = search_df.loc[search_df["restaurant_id"].astype(str) == str(selected_restaurant_id)].iloc[0]
         already_liked = False
         for entry in liked_entries:
@@ -239,7 +238,7 @@ with st.sidebar:
             liked_df = pd.DataFrame(filtered_liked_entries)[["name", "cuisine_type", "boro"]].rename(
                 columns={"name": "Restaurant", "cuisine_type": "Cuisine", "boro": "Borough"}
             )
-            st.dataframe(liked_df, use_container_width=True, hide_index=True)
+            st.dataframe(liked_df, width="stretch", hide_index=True)
         else:
             st.info("No liked restaurants match the current filters.")
 
@@ -266,7 +265,7 @@ with st.sidebar:
                 None,
             )
 
-        if st.button("Remove like", use_container_width=True, disabled=not edit_restaurant_id):
+        if st.button("Remove like", width="stretch", disabled=not edit_restaurant_id):
             liked_entries = [
                 entry for entry in liked_entries if entry["restaurant_id"] != edit_restaurant_id
             ]
@@ -277,56 +276,16 @@ with st.sidebar:
     else:
         st.caption("You have not liked any restaurants yet. Add a few above to personalize recommendations.")
 
-    st.markdown("---")
-    k = st.slider("Number of Clusters (K)", 4, 16, st.session_state.get("optimal_k", 10))
-    shared_algo = st.session_state.get("active_cluster_algorithm", "kmeans")
-    cluster_request = (shared_algo, int(k), CLUSTER_SCHEMA_VERSION)
-    if st.session_state.get("active_cluster_request") != cluster_request:
-        st.session_state["clustered_df"] = None
-        st.session_state["kmeans_model"] = None
-        st.session_state["active_cluster_request"] = cluster_request
-        st.session_state["optimal_k"] = int(k)
-    shared_algo_display = {
-        "kmeans": "our NumPy K-Means",
-        "gmm": "Gaussian Mixture",
-        "agglomerative": "Hierarchical / Ward",
-    }.get(shared_algo, "our NumPy K-Means")
-    st.caption(f"Cluster context follows the GIS Map setup: `{shared_algo_display}` with `K = {k}`.")
-
-    if st.button("🔄 Re-run Clustering"):
-        st.session_state["clustered_df"] = None
-
 user_history = st.session_state["user_history"]
 
-# ── Run clustering ────────────────────────────────────────────────────────────
-with st.spinner("Updating recommendation context..."):
-    cdf, kmeans, scaler, pca = get_clustered_data(
-        raw_df, user_history, k=k,
-        force=(st.session_state["clustered_df"] is None),
-        algorithm=st.session_state.get("active_cluster_algorithm", "kmeans"),
-    )
-    st.session_state["clustered_df"] = cdf
-    st.session_state["kmeans_model"] = kmeans
-    st.session_state["scaler"]       = scaler
-    st.session_state["pca_model"]    = pca
-
-predicted_cluster = predict_user_cluster(user_history, cdf, kmeans, scaler)
-st.session_state["predicted_cluster"] = predicted_cluster
-
 # ── K-NN Recommendation Engine ────────────────────────────────────────────────
-from utils.clustering import (
-    build_feature_matrix,
-    recommend_per_liked_knn,
-    apply_mmr,
-    collect_liked_vectors,
-)
-import plotly.graph_objects as go
+with st.spinner("Updating recommendation feature space..."):
+    X_restaurants, _, df_feat = build_feature_matrix(raw_df)
+    _, _, scaler = prepare_clustering_space(X_restaurants, fit=True)
 
 st.markdown("---")
-st.subheader("🧠 Your Liked-History Signal")
+st.subheader("Your Liked-History Signal")
 
-# Build the user feature vector and restaurant feature matrix
-X_restaurants, feature_columns, df_feat = build_feature_matrix(raw_df)
 liked_vectors, liked_metadata = collect_liked_vectors(profile, X_restaurants, df_feat)
 
 # Show the liked-history signal used by the recommender
@@ -352,11 +311,10 @@ if n_likes == 0:
 liked_ids = {str(v) for v in user_history.get("visited_ids", [])}
 
 st.markdown("---")
-st.subheader("⚙️ Recommendation Algorithm")
+st.subheader("Recommendation Settings")
 st.caption(
     "Per-liked KNN retrieves neighbors for each saved like, Reciprocal Rank Fusion "
-    "combines those lists, and MMR reranks the candidates for diversity. "
-    "Cluster membership is shown for context only; it is not the recommender's lookup rule."
+    "combines those lists, and MMR reranks the candidates for diversity."
 )
 mmr_lambda = st.slider(
     "MMR balance (λ)",
@@ -403,12 +361,11 @@ else:
 
 # ── Recommendation cards ──────────────────────────────────────────────────────
 st.markdown("---")
-st.subheader("🎯 Recommended Restaurants")
+st.subheader("Recommended Restaurants")
 st.caption(
     "Restaurants are ranked from your liked restaurants only: per-liked cosine "
     "neighbors in the 18-dim feature space are fused with RRF, then reranked by MMR. "
-    "The *Influenced by* column shows which saved like contributed each pick's best rank. "
-    "A candidate can come from any cluster if it is close to your liked examples."
+    "The *Influenced by* column shows which saved like contributed each pick's best rank."
 )
 
 if recs.empty:
@@ -438,7 +395,7 @@ else:
         "primary_influencer": "Influenced by",
     }
     display_df = display_df.rename(columns=rename_map)
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.dataframe(display_df, width="stretch", hide_index=True)
 
     # Expandable detail cards for top 5
     st.markdown("---")
@@ -475,19 +432,34 @@ else:
             if row.get("g_maps_url"):
                 st.markdown(f"[📍 Open in Google Maps]({row['g_maps_url']})")
 
-# ── PCA visualization with user position ──────────────────────────────────────
+# ── Cluster visualization kept as interpretive context ───────────────────────
 st.markdown("---")
-st.subheader("📍 Your Position in Restaurant Space")
-st.caption("Each dot is a restaurant, colored by cluster. After you save likes, the ⭐ shows the centroid of your liked restaurants in the PCA projection.")
+st.subheader("Restaurant Space Cluster View")
+st.caption(
+    "Each dot is a restaurant colored by cluster. The diamond marks the average "
+    "feature position of your liked restaurants, and dotted lines point to the "
+    "top recommendations. This view is explanatory; recommendations are still "
+    "ranked from your liked restaurants."
+)
 
-if pca is not None and hasattr(pca, 'axis_labels_'):
-    # Project all restaurants into PCA space
-    from utils.clustering import prepare_clustering_space, _scaled_space
-    X_scaled, X_cluster, _ = prepare_clustering_space(X_restaurants, scaler=scaler, fit=False)
-    X_pca_all = pca.transform(X_scaled)
+with st.spinner("Preparing cluster visualization..."):
+    cluster_df, _, cluster_scaler, cluster_pca = get_clustered_data(
+        raw_df,
+        user_history,
+        k=st.session_state.get("optimal_k", 10),
+        force=(st.session_state.get("clustered_df") is None),
+        algorithm=st.session_state.get("active_cluster_algorithm", "kmeans"),
+    )
 
-    # Cluster colors
-    CLUSTER_HEX = [
+if cluster_pca is not None and hasattr(cluster_pca, "axis_labels_"):
+    from utils.clustering import _scaled_space
+
+    X_scaled, _, _ = prepare_clustering_space(
+        X_restaurants, scaler=cluster_scaler, fit=False
+    )
+    X_pca_all = cluster_pca.transform(X_scaled)
+
+    cluster_hex = [
         "#6c8fff", "#ff9f43", "#6dda7f", "#ff6b8a",
         "#b983ff", "#ffd32a", "#48dbfb", "#ff6348",
         "#34d399", "#fb923c", "#a78bfa", "#22d3ee",
@@ -495,12 +467,10 @@ if pca is not None and hasattr(pca, 'axis_labels_'):
     ]
 
     fig = go.Figure()
-
-    # Plot restaurants by cluster
-    for cid in sorted(cdf["cluster_id"].unique()):
-        mask = cdf["cluster_id"] == cid
-        label = cdf[mask]["cluster_label"].iloc[0]
-        color = CLUSTER_HEX[cid % len(CLUSTER_HEX)]
+    for cid in sorted(cluster_df["cluster_id"].unique()):
+        mask = cluster_df["cluster_id"] == cid
+        label = cluster_df[mask]["cluster_label"].iloc[0]
+        color = cluster_hex[int(cid) % len(cluster_hex)]
         indices = np.where(mask.values)[0]
         fig.add_trace(go.Scatter3d(
             x=X_pca_all[indices, 0],
@@ -508,45 +478,48 @@ if pca is not None and hasattr(pca, 'axis_labels_'):
             z=X_pca_all[indices, 2],
             mode="markers",
             name=label,
-            marker=dict(size=3, color=color, opacity=0.5),
-            text=cdf[mask]["name"].values,
+            marker=dict(size=3, color=color, opacity=0.45),
+            text=cluster_df[mask]["name"].values,
             hovertemplate="%{text}<extra>" + label + "</extra>",
         ))
 
     if n_likes > 0:
-        # Project liked-history centroid into PCA space
-        user_scaled = _scaled_space(like_profile_vector, scaler)
-        user_pca = pca.transform(user_scaled)[0]
-
+        liked_scaled = _scaled_space(like_profile_vector, cluster_scaler)
+        liked_pca = cluster_pca.transform(liked_scaled)[0]
         fig.add_trace(go.Scatter3d(
-            x=[user_pca[0]], y=[user_pca[1]], z=[user_pca[2]],
+            x=[liked_pca[0]],
+            y=[liked_pca[1]],
+            z=[liked_pca[2]],
             mode="markers+text",
-            name="⭐ Liked-history centroid",
-            marker=dict(size=12, color="#FFD700", symbol="diamond",
-                        line=dict(width=2, color="#000")),
-            text=["⭐ Your likes"],
+            name="Liked-history center",
+            marker=dict(
+                size=12,
+                color="#FFD700",
+                symbol="diamond",
+                line=dict(width=2, color="#000000"),
+            ),
+            text=["Your likes"],
             textposition="top center",
         ))
 
-        # Draw lines from liked-history centroid to top-5 recommendations
-        for i, (_, row) in enumerate(recs.head(5).iterrows()):
+        for _, row in recs.head(5).iterrows():
             rid = str(row.get("restaurant_id", ""))
             idx_match = df_feat.index[df_feat["restaurant_id"].astype(str) == rid]
-            if len(idx_match) > 0:
-                idx = df_feat.index.get_loc(idx_match[0])
-                fig.add_trace(go.Scatter3d(
-                    x=[user_pca[0], X_pca_all[idx, 0]],
-                    y=[user_pca[1], X_pca_all[idx, 1]],
-                    z=[user_pca[2], X_pca_all[idx, 2]],
-                    mode="lines",
-                    line=dict(color="#FFD700", width=2, dash="dot"),
-                    showlegend=False,
-                    hoverinfo="skip",
-                ))
+            if len(idx_match) == 0:
+                continue
+            idx = df_feat.index.get_loc(idx_match[0])
+            fig.add_trace(go.Scatter3d(
+                x=[liked_pca[0], X_pca_all[idx, 0]],
+                y=[liked_pca[1], X_pca_all[idx, 1]],
+                z=[liked_pca[2], X_pca_all[idx, 2]],
+                mode="lines",
+                line=dict(color="#FFD700", width=2, dash="dot"),
+                showlegend=False,
+                hoverinfo="skip",
+            ))
 
-    axis_labels = pca.axis_labels_ if hasattr(pca, 'axis_labels_') else ["PC1", "PC2", "PC3"]
-    var_explained = pca.explained_variance_ratio_[:3] if hasattr(pca, 'explained_variance_ratio_') else [0, 0, 0]
-
+    axis_labels = cluster_pca.axis_labels_
+    var_explained = cluster_pca.explained_variance_ratio_[:3]
     fig.update_layout(
         height=600,
         scene=dict(
@@ -558,28 +531,4 @@ if pca is not None and hasattr(pca, 'axis_labels_'):
         paper_bgcolor="rgba(0,0,0,0)",
         font_family="Inter, -apple-system, sans-serif",
     )
-    st.plotly_chart(fig, use_container_width=True)
-
-# ── All clusters overview ─────────────────────────────────────────────────────
-st.markdown("---")
-st.subheader("All Cluster Profiles")
-
-cluster_summary = cdf.groupby(["cluster_id", "cluster_label"]).agg(
-    Count=("restaurant_id", "count"),
-    Avg_Rating=("avg_rating", "mean"),
-    Avg_Price=("price_tier", "mean"),
-    Top_Cuisine=("cuisine_type", lambda x: x.value_counts().index[0]),
-).reset_index()
-
-cluster_summary["Avg_Rating"] = cluster_summary["Avg_Rating"].round(2)
-cluster_summary["Avg_Price_Tier"] = cluster_summary["Avg_Price"].map(format_price_tier_mean)
-cluster_summary["Is My Cluster"] = cluster_summary["cluster_id"].apply(
-    lambda x: "🎯 You" if x == predicted_cluster else ""
-)
-cluster_summary.columns = [c.replace("_", " ") for c in cluster_summary.columns]
-st.caption("Average price is Google Places price tier, not dollars: 1=$, 2=$$, 3=$$$, 4=$$$$.")
-st.dataframe(
-    cluster_summary.drop(columns=["cluster id", "Avg Price"], errors="ignore"),
-    use_container_width=True,
-    hide_index=True,
-)
+    st.plotly_chart(fig, width="stretch")

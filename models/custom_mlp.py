@@ -10,8 +10,6 @@ loop (mini-batching, class weighting, early stopping), the hyperparameter
 search, and the counterfactual feature optimiser are all written on top of
 PyTorch primitives only.
 
-Author: Rahul Adusumalli (ML Classifier Lead), extended by Ryan Han for
-integration with the real preprocessed data pipeline.
 Course: CSCI-UA 473 · Fundamentals of Machine Learning · Spring 2026
 """
 

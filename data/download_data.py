@@ -4,7 +4,6 @@ download_data.py — Fetch NYC DOHMH Restaurant Inspection Results from OpenData
 Downloads the dataset via the Socrata Open Data API (SODA) and saves as CSV.
 Default limit is 50,000 rows for development; set a higher limit for final training.
 
-Author: Ryan Han (Data & DevOps)
 Course: CSCI-UA 473 · Fundamentals of Machine Learning · Spring 2026
 """
 

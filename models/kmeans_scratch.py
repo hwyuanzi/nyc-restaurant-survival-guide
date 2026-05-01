@@ -71,8 +71,12 @@ class KMeansScratch:
             D2 = np.array(
                 [min(np.dot(x - c, x - c) for c in centroids) for x in X]
             )
+            total_distance = D2.sum()
+            if total_distance <= 0:
+                centroids.append(X[rng.randint(0, n)].copy())
+                continue
             # Sample next centroid with probability proportional to D²
-            probs = D2 / D2.sum()
+            probs = D2 / total_distance
             cumprobs = np.cumsum(probs)
             r = rng.random()
             idx = int(np.searchsorted(cumprobs, r))
@@ -149,6 +153,12 @@ class KMeansScratch:
         Runs `n_init` times; keeps the solution with the lowest inertia.
         """
         X = np.asarray(X, dtype=np.float64)
+        if X.ndim != 2 or X.shape[0] == 0:
+            raise ValueError("KMeansScratch.fit_predict expects a non-empty 2D array")
+        if self.n_clusters < 1:
+            raise ValueError("n_clusters must be at least 1")
+        if self.n_clusters > X.shape[0]:
+            raise ValueError("n_clusters cannot exceed the number of samples")
         master_rng = np.random.RandomState(self.random_state)
 
         best_labels, best_centroids, best_inertia, best_iters = None, None, np.inf, 0
@@ -172,6 +182,8 @@ class KMeansScratch:
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Assign new points to their nearest centroid."""
+        if self.cluster_centers_ is None:
+            raise ValueError("KMeansScratch must be fitted before calling predict")
         return self._assign(np.asarray(X, dtype=np.float64), self.cluster_centers_)
 
     def transform(self, X: np.ndarray) -> np.ndarray:
@@ -179,6 +191,8 @@ class KMeansScratch:
         Return the (n_samples, n_clusters) matrix of Euclidean distances
         from each point to each centroid. Same contract as sklearn.transform().
         """
+        if self.cluster_centers_ is None:
+            raise ValueError("KMeansScratch must be fitted before calling transform")
         X = np.asarray(X, dtype=np.float64)
         return np.stack(
             [np.linalg.norm(X - c, axis=1) for c in self.cluster_centers_],
