@@ -118,9 +118,33 @@ with st.spinner(f"Running {algo_display}..."):
 predicted_cluster = predict_user_cluster(user_history, cdf, kmeans, scaler)
 st.session_state["predicted_cluster"] = predicted_cluster
 
-if predicted_cluster != -1:
-    cl_label = cdf[cdf["cluster_id"] == predicted_cluster]["cluster_label"].iloc[0]
-    st.success(f"🎯 Your predicted cluster: **{cl_label}**")
+cluster_options = (
+    cdf[["cluster_id", "cluster_label"]]
+    .drop_duplicates()
+    .sort_values(["cluster_label", "cluster_id"])
+)
+cluster_label_to_id = {
+    row.cluster_label: int(row.cluster_id)
+    for row in cluster_options.itertuples(index=False)
+}
+
+if "pca_focus_cluster" not in st.session_state:
+    st.session_state["pca_focus_cluster"] = "All clusters"
+
+top_note_col, top_control_col = st.columns([2.2, 1.3])
+with top_note_col:
+    if predicted_cluster != -1:
+        cl_label = cdf[cdf["cluster_id"] == predicted_cluster]["cluster_label"].iloc[0]
+        st.success(f"🎯 Your predicted cluster: **{cl_label}**")
+    else:
+        st.info("🎯 No predicted cluster yet. Like a few restaurants to personalize this view.")
+with top_control_col:
+    focus_cluster_label = st.selectbox(
+        "Focus cluster",
+        ["All clusters"] + cluster_options["cluster_label"].tolist(),
+        key="pca_focus_cluster",
+        help="Jump the visualization and cluster evidence to one cluster, such as Asian.",
+    )
 
 X_features, feature_columns, clustered_features_df = build_feature_matrix(cdf)
 X_scaled_cluster, X_cluster_space, _ = prepare_clustering_space(X_features, scaler=scaler, fit=False)
@@ -173,6 +197,12 @@ if filter_boros:
     plot_df = plot_df[plot_df["boro"].isin(filter_boros)]
 if filter_cuisines:
     plot_df = plot_df[plot_df["cuisine_type"].isin(filter_cuisines)]
+
+focus_cluster_id = None
+if focus_cluster_label != "All clusters":
+    focus_cluster_id = cluster_label_to_id.get(focus_cluster_label)
+    if focus_cluster_id is not None:
+        plot_df = plot_df[plot_df["cluster_id"] == focus_cluster_id]
 
 if size_by == "Review count":
     raw_size = pd.to_numeric(plot_df["review_count"], errors="coerce").fillna(0)
@@ -305,8 +335,8 @@ fig.update_layout(
     ),
     legend=dict(
         orientation="h",
-        yanchor="top",
-        y=-0.12,
+        yanchor="bottom",
+        y=1.02,
         xanchor="left",
         x=0,
         bgcolor="rgba(20,20,30,0.8)",
@@ -314,7 +344,7 @@ fig.update_layout(
         font=dict(color="#e0e0f0"),
     ),
     font=dict(color="#e0e0f0"),
-    margin=dict(l=0, r=0, t=40, b=60),
+    margin=dict(l=0, r=0, t=90, b=20),
 )
 
 chart_key = f"pca_chart_{len(plot_df)}_{k}_{color_by}_{projection_mode}"
@@ -514,18 +544,20 @@ st.caption(
     "To make the analysis defensible, each cluster is paired with a textual explanation, summary statistics, and prototype restaurants nearest to the centroid."
 )
 
-cluster_options = (
-    cdf[["cluster_id", "cluster_label"]]
-    .drop_duplicates()
-    .sort_values(["cluster_label", "cluster_id"])
+default_cluster_id = (
+    focus_cluster_id
+    if focus_cluster_id is not None
+    else (predicted_cluster if predicted_cluster != -1 else int(cdf["cluster_id"].value_counts().idxmax()))
 )
-default_cluster_id = predicted_cluster if predicted_cluster != -1 else int(cdf["cluster_id"].value_counts().idxmax())
 focus_cluster_id = default_cluster_id
 focus_df = cdf[cdf["cluster_id"] == focus_cluster_id].copy()
 focus_row = focus_df.iloc[0]
 
 label_prefix = "your current cluster" if predicted_cluster != -1 else "the largest cluster in the current analysis"
-st.info(f"Evidence for **{focus_row['cluster_label']}** ({label_prefix}): {focus_row.get('cluster_story', 'No explanation available.')}")
+if focus_cluster_label != "All clusters":
+    st.info(f"Evidence for **{focus_row['cluster_label']}**: {focus_row.get('cluster_story', 'No explanation available.')}")
+else:
+    st.info(f"Evidence for **{focus_row['cluster_label']}** ({label_prefix}): {focus_row.get('cluster_story', 'No explanation available.')}")
 if focus_row.get("cluster_cuisine_mix"):
     st.caption(f"🍽️ Cuisine mix: {focus_row['cluster_cuisine_mix']}")
 if focus_row.get("cluster_boro_mix"):

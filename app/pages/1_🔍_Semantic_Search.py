@@ -28,7 +28,6 @@ require_auth()
 EXAMPLES = [
     "cozy Italian pasta spot in Brooklyn",
     "late night ramen and dumplings Manhattan",
-    "healthy vegan grain bowls",
     "romantic French bistro with good wine",
     "authentic Mexican street tacos Queens",
     "spicy Korean BBQ grill",
