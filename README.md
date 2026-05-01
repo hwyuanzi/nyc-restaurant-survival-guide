@@ -282,7 +282,7 @@ Recommendation uses explicit liked restaurants only:
 
 The recommendation algorithm is independent of cluster labels. The cluster view on the Recommendation page explains where liked restaurants and top picks sit in restaurant feature space; it does not assign the user to a cluster.
 
-The Recommendation sidebar is intentionally limited to the active profile's saved likes. It no longer includes add-from-search controls; adding likes stays with the restaurant discovery surfaces, while Recommendation focuses on reviewing the signal used by the recommender and removing a saved like when needed.
+The Recommendation sidebar is intentionally limited to the active profile's saved likes because the recommender should expose the exact positive signals used for ranking. Likes are added from restaurant discovery surfaces, while the Recommendation page focuses on reviewing that saved preference signal and removing a like when needed.
 
 ---
 
@@ -290,7 +290,11 @@ The Recommendation sidebar is intentionally limited to the active profile's save
 
 ```text
 nyc-restaurant-survival-guide/
+├── .streamlit/
+│   ├── config.toml
+│   └── secrets.toml.example
 ├── app/
+│   ├── __init__.py
 │   ├── Main.py
 │   ├── ui_utils.py
 │   └── pages/
@@ -300,25 +304,36 @@ nyc-restaurant-survival-guide/
 │       ├── 4_📊_PCA_Embedding_Explorer.py
 │       └── 5_🔮_Recommendations.py
 ├── data/
+│   ├── __init__.py
 │   ├── download_data.py
 │   ├── preprocess.py
+│   ├── feature_config.json
 │   ├── train.csv / test.csv
 │   ├── meta_train.csv / meta_test.csv
-│   ├── feature_config.json
-│   ├── cluster caches and model caches
+│   ├── user_profiles.json / user_profiles.example.json
+│   ├── cluster_cache.parquet
+│   ├── cluster_cache_agglo.parquet / cluster_cache_gmm.parquet
+│   ├── kmeans_model.joblib
+│   ├── cluster_model_agglo.joblib / cluster_model_gmm.joblib
 │   └── cache/
 │       ├── prepared_search_v4_3800.pkl
 │       ├── embeddings_prepared_v4_3800_2835.npy
 │       ├── enriched_restaurants_3800.pkl
-│       └── health classifier artifacts
+│       ├── health_classifier.pt
+│       ├── health_classifier_history.json
+│       └── health_classifier_importance.json
 ├── models/
+│   ├── __init__.py
 │   ├── custom_mlp.py
 │   └── kmeans_scratch.py
 ├── tests/
+│   ├── __init__.py
 │   ├── test_custom_mlp.py
 │   ├── test_kmeans_scratch.py
+│   ├── test_recommendations.py
 │   └── test_semantic_search.py
 ├── utils/
+│   ├── __init__.py
 │   ├── auth.py
 │   ├── clustering.py
 │   ├── data.py
@@ -326,6 +341,8 @@ nyc-restaurant-survival-guide/
 │   ├── search.py
 │   ├── search_assets.py
 │   └── user_profile.py
+├── .gitignore
+├── LICENSE
 ├── requirements.txt
 ├── Pipfile
 └── README.md

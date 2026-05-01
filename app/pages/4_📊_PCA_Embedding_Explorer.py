@@ -347,6 +347,10 @@ if pca_model is not None and _feature_cols and pca_model.components_ is not None
     )
 
     def _fmt(name: str) -> str:
+        if name == "lat_norm":
+            return "Latitude"
+        if name == "lng_norm":
+            return "Longitude"
         name = name.replace("_norm", "").replace("_", " ")
         if name.startswith("cuisine "):
             return name.replace("cuisine ", "") + " cuisine"
@@ -398,7 +402,7 @@ if pca_model is not None and _feature_cols and pca_model.components_ is not None
             elif _pc_idx == 1:
                 st.info(
                     "PC2 also involves geographic features, but captures **continuous "
-                    "lat/lng coordinates** (east–west spread) rather than borough identity. "
+                    "latitude/longitude coordinates** (east–west spread) rather than borough identity. "
                     "PC1 and PC2 are orthogonal — they explain different, non-overlapping "
                     "variance in the data.",
                     icon="ℹ️",

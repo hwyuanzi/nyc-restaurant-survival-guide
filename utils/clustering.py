@@ -123,8 +123,8 @@ FEATURE_LABELS = {
     "rating_norm": "Google rating",
     "review_norm": "Review volume",
     "health_norm": "Health grade",
-    "lat_norm": "North–south location",
-    "lng_norm": "East–west location",
+    "lat_norm": "Latitude",
+    "lng_norm": "Longitude",
     "user_affinity": "User affinity",
 }
 # Dynamically add cuisine group and borough labels
