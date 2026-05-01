@@ -36,6 +36,7 @@ data/feature_config.json
 
 # Streamlit
 .streamlit/secrets.toml
+data/user_profiles.local.json
 
 # Jupyter (if any)
 .ipynb_checkpoints/

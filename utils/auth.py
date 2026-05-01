@@ -29,8 +29,7 @@ def authenticate_user(username, password):
     stored_salt = profile.get("salt")
     
     if not stored_hash:
-        # For legacy profiles that have no password set
-        return True, profile["id"]
+        return False, None
         
     hashed, _ = hash_password(password, stored_salt)
     if hashed == stored_hash:

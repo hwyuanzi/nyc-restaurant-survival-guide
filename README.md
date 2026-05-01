@@ -6,7 +6,7 @@ New York University, Spring 2026
 
 NYC Restaurant Survival Guide is a Streamlit machine-learning app for exploring New York City restaurants. It combines real NYC Department of Health and Mental Hygiene inspection data, cached Google Places metadata, semantic search, a health-grade risk classifier, K-Means clustering from scratch, PCA-based cluster visualization, and personalized recommendations from saved liked restaurants.
 
-The repository is set up to run locally without API keys or live downloads. The prepared restaurant table, embedding matrix, classifier checkpoint, and clustering caches are committed so the demo can start from the submitted files.
+The repository is set up to run locally without live downloads. The prepared restaurant table, embedding matrix, classifier checkpoint, and clustering caches are committed so the demo can start from the submitted files. Restaurant photos use the Google Places Photo API and only display when you provide a local `GOOGLE_API_KEY`.
 
 ---
 
@@ -67,7 +67,30 @@ Open the local URL shown by Streamlit, usually:
 http://localhost:8501
 ```
 
-### 4. Optional Pipenv Workflow
+### 4. Optional: Enable Restaurant Photos
+
+Search results still work without a Google key, but restaurant photos require the Google Places Photo API. Add a key in one of these two ways:
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+```
+
+Then edit `.streamlit/secrets.toml`:
+
+```toml
+GOOGLE_API_KEY = "your_google_api_key_here"
+```
+
+Or set the key as an environment variable before starting Streamlit:
+
+```bash
+export GOOGLE_API_KEY="your_google_api_key_here"
+streamlit run app/Main.py
+```
+
+The real `.streamlit/secrets.toml` file is intentionally ignored by Git.
+
+### 5. Optional Pipenv Workflow
 
 ```bash
 pip install pipenv
@@ -79,7 +102,7 @@ pipenv run streamlit run app/Main.py
 
 ## Step-By-Step App Use
 
-1. **Log in or create an account.** User accounts are stored locally in `data/user_profiles.json`; no external authentication service is used.
+1. **Log in or create an account.** User accounts are stored locally in `data/user_profiles.local.json`; no external authentication service is used. This runtime file is ignored by Git so personal profiles, liked restaurants, password hashes, and salts are not committed.
 2. **Start on the Home page.** Try one of the suggested restaurant queries, review the result cards, and click "Like this restaurant" on places you would actually want.
 3. **Open Semantic Search.** Use natural language such as `cozy Italian pasta in Brooklyn`, `late night ramen Manhattan`, or `cheap Caribbean food Bronx`. The page uses cached sentence embeddings when available and falls back gracefully if the embedding model cannot load.
 4. **Open Health Grade Risk Classifier.** Select a held-out restaurant, inspect predicted A/B/C risk probabilities, change inspection-pattern inputs, and review feature importance plus the constrained "Path to A" analysis.
@@ -154,6 +177,10 @@ Earlier experimental caches, including old v3 prepared search files, partial v4 
 ### Dataset Size Choice
 
 The prepared search sample starts from `3,800` candidate restaurants and keeps `2,835` restaurants after Google enrichment and validity filters. A larger prepared dataset could improve search and recommendation coverage, especially for rare cuisines and neighborhoods. For the submitted project, the cache size is deliberately moderate so the repository stays lightweight, starts quickly on a local laptop, and still lets users rebuild a larger local cache from NYC DOHMH plus Google Places if they want more coverage.
+
+### Local Profile Storage
+
+Runtime accounts are written to `data/user_profiles.local.json`, which is ignored by Git. The committed `data/user_profiles.json` and `data/user_profiles.example.json` are empty placeholders only. New profiles store only account metadata, password hash/salt, and `likes`. The recommendation page intentionally ranks from liked restaurants only, so cuisine, borough, budget, spice, and vibe preference fields are not created by default.
 
 ---
 
@@ -313,6 +340,16 @@ Set a Google Places key either in the environment or in `.streamlit/secrets.toml
 
 ```bash
 export GOOGLE_API_KEY="your_key_here"
+```
+
+For `.streamlit/secrets.toml`, copy the example file and fill in your key:
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+```
+
+```toml
+GOOGLE_API_KEY = "your_key_here"
 ```
 
 Then run:

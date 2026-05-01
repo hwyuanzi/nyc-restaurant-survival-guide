@@ -129,6 +129,21 @@ col1.metric("Prepared Restaurants", f"{cache_info.get('rows', len(enriched_df)):
 col2.metric("Embedding Model", "all-mpnet-base-v2" if embeddings is not None else "Lexical only")
 col3.metric("Saved Likes", len(profile.get("likes", [])))
 
+if not api_key:
+    st.warning(
+        "Restaurant photos require a Google Places API key. Search still works, "
+        "but result cards show the fallback icon until `GOOGLE_API_KEY` is set."
+    )
+    with st.expander("Enable restaurant photos"):
+        st.markdown(
+            "Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml`, "
+            "then replace the placeholder with your Google Places API key. You can "
+            "also set `GOOGLE_API_KEY` as an environment variable before launching Streamlit."
+        )
+        st.code("cp .streamlit/secrets.toml.example .streamlit/secrets.toml", language="bash")
+        st.code('GOOGLE_API_KEY = "your_google_api_key_here"', language="toml")
+        st.code("streamlit run app/Main.py", language="bash")
+
 col_q, col_examples = st.columns([3, 2])
 with col_q:
     query = st.text_input(

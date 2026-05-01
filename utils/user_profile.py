@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-USER_PROFILES_PATH = DATA_DIR / "user_profiles.json"
+USER_PROFILES_PATH = DATA_DIR / "user_profiles.local.json"
 DEFAULT_PROFILE_ID = "guest"
 
 CUISINE_OPTIONS = [
@@ -82,14 +82,6 @@ def _default_profile(name="Guest", profile_id=None):
     return {
         "id": profile_id,
         "name": name,
-        "survey_completed": False,
-        "favorite_cuisines": [],
-        "preferred_boroughs": [],
-        "budget": "$$",
-        "min_grade": "B",
-        "spice_tolerance": 3,
-        "adventurousness": 3,
-        "favorite_vibes": [],
         "likes": [],
         "created_at": timestamp,
         "updated_at": timestamp,
@@ -294,9 +286,8 @@ def score_restaurants_for_user(df, profile):
     liked_ids = {str(item.get("restaurant_id")) for item in liked_items if item.get("restaurant_id")}
     liked_cuisines = {str(item.get("cuisine", "")).lower() for item in liked_items if item.get("cuisine")}
     liked_boroughs = {str(item.get("boro", "")).lower() for item in liked_items if item.get("boro")}
-    min_grade = profile.get("min_grade", "B")
-    budget = profile.get("budget", "$$")
-    budget_value = BUDGET_OPTIONS.index(budget) + 1 if budget in BUDGET_OPTIONS else 2
+    min_grade = profile.get("min_grade")
+    budget = profile.get("budget")
     spice_tolerance = float(profile.get("spice_tolerance", 3))
     adventurousness = float(profile.get("adventurousness", 3))
 
@@ -311,12 +302,15 @@ def score_restaurants_for_user(df, profile):
         borough_match = borough.str.lower().isin(preferred_boroughs)
         preference += borough_match.astype(float) * 1.3
 
-    preference += (1 - (price - budget_value).abs() / 3).clip(0, 1) * 1.2
+    if budget in BUDGET_OPTIONS:
+        budget_value = BUDGET_OPTIONS.index(budget) + 1
+        preference += (1 - (price - budget_value).abs() / 3).clip(0, 1) * 1.2
 
-    grade_floor = GRADE_ORDER.get(min_grade, 2)
-    grade_values = grade.map(lambda value: GRADE_ORDER.get(value, 0))
-    preference += (grade_values >= grade_floor).astype(float) * 0.9
-    preference -= (grade_values < grade_floor).astype(float) * 0.6
+    if min_grade in GRADE_ORDER:
+        grade_floor = GRADE_ORDER[min_grade]
+        grade_values = grade.map(lambda value: GRADE_ORDER.get(value, 0))
+        preference += (grade_values >= grade_floor).astype(float) * 0.9
+        preference -= (grade_values < grade_floor).astype(float) * 0.6
 
     if liked_cuisines:
         preference += cuisine.str.lower().isin(liked_cuisines).astype(float) * 1.0

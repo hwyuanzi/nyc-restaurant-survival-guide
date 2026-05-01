@@ -55,7 +55,7 @@ if not st.session_state["authenticated_profile_id"]:
                 st.session_state["authenticated_profile_id"] = profile_id
                 st.rerun()
             else:
-                st.error("Invalid username or password. (If you have an old account without a password, try logging in with an empty password.)")
+                st.error("Invalid username or password.")
 
     with tab_signup:
         signup_username = st.text_input("Choose a Username", key="signup_username")
