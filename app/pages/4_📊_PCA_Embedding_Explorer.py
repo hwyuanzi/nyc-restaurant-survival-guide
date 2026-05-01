@@ -104,7 +104,7 @@ with st.spinner(f"Running {algo_display}..."):
         raw_df,
         user_history,
         k=k,
-        force=(st.session_state["clustered_df"] is None),
+        force=False,
         algorithm=algorithm,
     )
     st.session_state["clustered_df"] = cdf

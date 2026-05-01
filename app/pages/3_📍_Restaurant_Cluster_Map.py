@@ -137,7 +137,7 @@ algo_display = {v: k_ for k_, v in ALGO_OPTIONS.items()}[algorithm]
 with st.spinner(f"Running {algo_display}..."):
     cdf, kmeans, scaler, pca = get_clustered_data(
         raw_df, user_history, k=k,
-        force=(st.session_state["clustered_df"] is None),
+        force=False,
         algorithm=algorithm,
     )
     st.session_state["clustered_df"] = cdf

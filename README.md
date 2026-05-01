@@ -108,7 +108,7 @@ pipenv run streamlit run app/Main.py
 4. **Open Health Grade Risk Classifier.** Select a held-out restaurant, inspect predicted A/B/C risk probabilities, change inspection-pattern inputs, and review feature importance plus the constrained "Path to A" analysis.
 5. **Open Restaurant Cluster GIS Map.** View restaurants colored by learned cluster on an NYC map. The default clustering path uses the NumPy K-Means++ implementation; GMM and Ward are included as comparison baselines.
 6. **Open PCA Embedding Explorer.** Inspect the same clusters in 3D PCA, centroid-distance view, or t-SNE; use the feature loading and prototype panels to explain what separates clusters.
-7. **Open Personalized Recommendations.** Add or remove liked restaurants in the sidebar. Recommendations are generated from liked-history nearest neighbors, RRF fusion, and MMR diversity reranking. The cluster visualization on this page is explanatory context, not a "you belong to this cluster" rule.
+7. **Open Personalized Recommendations.** Review the current profile's liked restaurants in the sidebar and remove any saved like if needed. New likes are added from Home or Semantic Search result cards. Recommendations are generated from liked-history nearest neighbors, RRF fusion, and MMR diversity reranking. The cluster visualization on this page is explanatory context, not a "you belong to this cluster" rule.
 
 ---
 
@@ -174,13 +174,23 @@ These files are intentionally committed for a reliable local demo:
 
 Earlier experimental caches, including old v3 prepared search files, partial v4 embedding files, and hyperparameter-search JSON output, are not needed for the final app and have been removed from the active repository state.
 
+### Cluster Cache Behavior
+
+The cluster-related pages all use the same cache-aware clustering helper:
+
+- `Restaurant Cluster GIS Map`
+- `PCA Embedding Explorer`
+- `Personalized Recommendations`
+
+You do not need to open the GIS Map page first. Any of these pages can load the committed cluster cache directly. If a matching cache is missing, stale, corrupt, or no longer matches the selected algorithm/K/data signature, that page recomputes the clusters and writes a fresh cache. User liked history does not invalidate the cluster cache because clustering is learned from restaurant features only; liked history is recomputed as per-session context for affinity scores, recommendation lines, and the liked-history marker.
+
 ### Dataset Size Choice
 
 The prepared search sample starts from `3,800` candidate restaurants and keeps `2,835` restaurants after Google enrichment and validity filters. A larger prepared dataset could improve search and recommendation coverage, especially for rare cuisines and neighborhoods. For the submitted project, the cache size is deliberately moderate so the repository stays lightweight, starts quickly on a local laptop, and still lets users rebuild a larger local cache from NYC DOHMH plus Google Places if they want more coverage.
 
 ### Local Profile Storage
 
-Runtime accounts are written to `data/user_profiles.local.json`, which is ignored by Git. The committed `data/user_profiles.json` and `data/user_profiles.example.json` are empty placeholders only. New profiles store only account metadata, password hash/salt, and `likes`. The recommendation page intentionally ranks from liked restaurants only, so cuisine, borough, budget, spice, and vibe preference fields are not created by default.
+Runtime accounts are written to `data/user_profiles.local.json`, which is ignored by Git. The committed `data/user_profiles.json` and `data/user_profiles.example.json` are empty placeholders only. New profiles store only account metadata, password hash/salt, and `likes`. Likes are added from Home or Semantic Search result cards; the Recommendation sidebar shows the active profile's liked restaurants and lets the user remove one. The recommendation page intentionally ranks from liked restaurants only, so cuisine, borough, budget, spice, and vibe preference fields are not created by default.
 
 ---
 
@@ -271,6 +281,8 @@ Recommendation uses explicit liked restaurants only:
 5. Maximal Marginal Relevance reranks the candidates to balance relevance and diversity after the liked-cuisine signal has been applied.
 
 The recommendation algorithm is independent of cluster labels. The cluster view on the Recommendation page explains where liked restaurants and top picks sit in restaurant feature space; it does not assign the user to a cluster.
+
+The Recommendation sidebar is intentionally limited to the active profile's saved likes. It no longer includes add-from-search controls; adding likes stays with the restaurant discovery surfaces, while Recommendation focuses on reviewing the signal used by the recommender and removing a saved like when needed.
 
 ---
 

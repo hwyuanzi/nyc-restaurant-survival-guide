@@ -19,8 +19,6 @@ from utils.clustering import (
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
 from utils.user_profile import (
     get_profile,
-    get_valid_borough_options,
-    get_valid_cuisine_options,
     init_session_state,
     profile_to_user_history,
     upsert_profile,
@@ -48,11 +46,6 @@ def format_price_tier(value, escape_dollars=False):
         return "—"
     price_text = "$" * int(round(float(numeric_value)))
     return price_text.replace("$", r"\$") if escape_dollars else price_text
-
-
-def build_restaurant_option(row):
-    area = row.get("boro") or row.get("neighborhood") or "NYC"
-    return f"{row.get('name', 'Unknown')} · {row.get('cuisine_type', 'Unknown')} · {area}"
 
 
 def load_liked_entries(profile, df):
@@ -137,7 +130,7 @@ with st.sidebar:
     profile_updated_at = profile.get("updated_at", "")
     st.markdown("---")
     st.markdown("### Liked Restaurants")
-    st.caption("Add or remove liked restaurants here. No ratings are needed; every liked restaurant is treated as a positive example.")
+    st.caption("Restaurants this profile has liked. Select one below to remove it.")
 
     session_profile_key = st.session_state.get("recommendations_history_profile_id")
     session_profile_updated_at = st.session_state.get("recommendations_history_profile_updated_at")
@@ -148,123 +141,26 @@ with st.sidebar:
 
     liked_entries = st.session_state.get("recommendations_liked_entries", [])
 
-    search_query = st.text_input(
-        "Search restaurants",
-        placeholder="Type a name, cuisine, borough, or address",
-        key="recommendations_liked_restaurant_search",
-    ).strip().lower()
-    search_filter_col1, search_filter_col2 = st.columns(2)
-    with search_filter_col1:
-        add_boro_filter = st.selectbox(
-            "Add-from borough",
-            ["All"] + get_valid_borough_options(raw_df),
-            key="recommendations_add_boro_filter",
+    if liked_entries:
+        liked_df = pd.DataFrame(liked_entries)[["name", "cuisine_type", "boro"]].rename(
+            columns={"name": "Restaurant", "cuisine_type": "Cuisine", "boro": "Borough"}
         )
-    with search_filter_col2:
-        add_cuisine_filter = st.selectbox(
-            "Add-from cuisine",
-            ["All"] + get_valid_cuisine_options(raw_df),
-            key="recommendations_add_cuisine_filter",
-        )
+        st.dataframe(liked_df, width="stretch", hide_index=True)
 
-    search_df = raw_df.drop_duplicates(subset=["restaurant_id"]).copy()
-    if add_boro_filter != "All":
-        search_df = search_df[search_df["boro"] == add_boro_filter]
-    if add_cuisine_filter != "All":
-        search_df = search_df[search_df["cuisine_type"] == add_cuisine_filter]
-    if search_query:
-        search_mask = (
-            search_df["name"].fillna("").str.lower().str.contains(search_query, regex=False)
-            | search_df["cuisine_type"].fillna("").str.lower().str.contains(search_query, regex=False)
-            | search_df["boro"].fillna("").str.lower().str.contains(search_query, regex=False)
-            | search_df["address"].fillna("").str.lower().str.contains(search_query, regex=False)
-        )
-        search_df = search_df[search_mask]
-
-    search_df = search_df.sort_values(["name", "restaurant_id"]).head(75)
-    restaurant_options = search_df["restaurant_id"].astype(str).tolist()
-
-    selected_restaurant_id = None
-    if restaurant_options:
-        selected_restaurant_id = st.selectbox(
-            "Restaurant",
-            options=restaurant_options,
-            format_func=lambda rid: build_restaurant_option(
-                search_df.loc[search_df["restaurant_id"].astype(str) == str(rid)].iloc[0].to_dict()
+        edit_restaurant_id = st.selectbox(
+            "Liked restaurant",
+            options=[entry["restaurant_id"] for entry in liked_entries],
+            format_func=lambda rid: next(
+                (
+                    entry["name"]
+                    for entry in liked_entries
+                    if entry["restaurant_id"] == rid
+                ),
+                rid,
             ),
             index=None,
-            placeholder="Choose a restaurant",
+            placeholder="Select a liked restaurant to remove",
         )
-    else:
-        st.caption("No matching restaurants found for the current search.")
-
-    if st.button("Add liked restaurant", width="stretch", disabled=not selected_restaurant_id):
-        selected_row = search_df.loc[search_df["restaurant_id"].astype(str) == str(selected_restaurant_id)].iloc[0]
-        already_liked = False
-        for entry in liked_entries:
-            if entry["restaurant_id"] == str(selected_restaurant_id):
-                already_liked = True
-                break
-        if not already_liked:
-            liked_entries.append({
-                "restaurant_id": str(selected_row["restaurant_id"]),
-                "name": selected_row.get("name", "Unknown"),
-                "cuisine_type": selected_row.get("cuisine_type", ""),
-                "boro": selected_row.get("boro", ""),
-                "address": selected_row.get("address", ""),
-            })
-            liked_entries.sort(key=lambda item: (item["name"].lower(), item["restaurant_id"]))
-            st.session_state["recommendations_liked_entries"] = liked_entries
-            profile = persist_liked_entries(profile_id, liked_entries, raw_df)
-            st.success("Restaurant added to your liked list.")
-        else:
-            st.info("That restaurant is already in your liked list.")
-        st.rerun()
-
-    if liked_entries:
-        st.markdown("#### Review And Edit Your Likes")
-        liked_entries_df = pd.DataFrame(liked_entries)
-        liked_borough_options = ["All"] + get_valid_borough_options(liked_entries_df)
-        liked_cuisine_options = ["All"] + get_valid_cuisine_options(liked_entries_df, column="cuisine_type")
-        liked_boro_filter = st.selectbox("Liked borough filter", liked_borough_options, key="liked_boro_filter")
-        liked_cuisine_filter = st.selectbox("Liked cuisine filter", liked_cuisine_options, key="liked_cuisine_filter")
-
-        filtered_liked_entries = [
-            entry for entry in liked_entries
-            if (liked_boro_filter == "All" or entry["boro"] == liked_boro_filter)
-            and (liked_cuisine_filter == "All" or entry["cuisine_type"] == liked_cuisine_filter)
-        ]
-        st.caption(f"Showing {len(filtered_liked_entries)} of {len(liked_entries)} liked restaurants.")
-        if filtered_liked_entries:
-            liked_df = pd.DataFrame(filtered_liked_entries)[["name", "cuisine_type", "boro"]].rename(
-                columns={"name": "Restaurant", "cuisine_type": "Cuisine", "boro": "Borough"}
-            )
-            st.dataframe(liked_df, width="stretch", hide_index=True)
-        else:
-            st.info("No liked restaurants match the current filters.")
-
-        editable_entries = filtered_liked_entries
-        edit_restaurant_id = None
-        selected_edit_entry = None
-        if editable_entries:
-            edit_restaurant_id = st.selectbox(
-                "Edit a liked restaurant",
-                options=[entry["restaurant_id"] for entry in editable_entries],
-                format_func=lambda rid: next(
-                    (
-                        entry["name"]
-                        for entry in editable_entries
-                        if entry["restaurant_id"] == rid
-                    ),
-                    rid,
-                ),
-                index=None,
-                placeholder="Select a liked restaurant",
-            )
-            selected_edit_entry = next(
-                (entry for entry in editable_entries if entry["restaurant_id"] == edit_restaurant_id),
-                None,
-            )
 
         if st.button("Remove like", width="stretch", disabled=not edit_restaurant_id):
             liked_entries = [
@@ -275,7 +171,7 @@ with st.sidebar:
             st.success("Liked restaurant removed.")
             st.rerun()
     else:
-        st.caption("You have not liked any restaurants yet. Add a few above to personalize recommendations.")
+        st.caption("This profile has not liked any restaurants yet.")
 
 user_history = st.session_state["user_history"]
 
@@ -450,9 +346,12 @@ with st.spinner("Preparing cluster visualization..."):
         raw_df,
         user_history,
         k=st.session_state.get("optimal_k", 10),
-        force=(st.session_state.get("clustered_df") is None),
+        force=False,
         algorithm=st.session_state.get("active_cluster_algorithm", "kmeans"),
     )
+    st.session_state["clustered_df"] = cluster_df
+    st.session_state["scaler"] = cluster_scaler
+    st.session_state["pca_model"] = cluster_pca
 
 if cluster_pca is not None and hasattr(cluster_pca, "axis_labels_"):
     from utils.clustering import _scaled_space
