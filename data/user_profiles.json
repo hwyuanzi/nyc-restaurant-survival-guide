@@ -175,5 +175,47 @@
     "updated_at": "2026-04-22T23:23:49",
     "password_hash": "074b606a7fc7418d98d2cf39d2381e002dc367cfd0a70257a8eefb24c869d073",
     "salt": "908fd00a1804485c3bde8dda2e5d4530"
+  },
+  "j": {
+    "id": "j",
+    "name": "J",
+    "survey_completed": true,
+    "favorite_cuisines": [],
+    "preferred_boroughs": [],
+    "budget": "$$",
+    "min_grade": "B",
+    "spice_tolerance": 3,
+    "adventurousness": 3,
+    "favorite_vibes": [],
+    "likes": [
+      {
+        "restaurant_id": "50002267",
+        "camis": "50002267",
+        "g_place_id": "ChIJlQwTFfxKwokRhj9ExJdD4js",
+        "dba": "Ocean Sushi",
+        "cuisine": "Japanese",
+        "boro": "Staten Island",
+        "grade": "A",
+        "score": 4,
+        "source": "semantic_search",
+        "liked_at": "2026-04-30T23:24:15"
+      },
+      {
+        "restaurant_id": "50083809",
+        "camis": "50083809",
+        "g_place_id": "ChIJg9tsfk5ewokRESmZ1Ph79Jw",
+        "dba": "Tomo Japanese Cafe",
+        "cuisine": "Japanese",
+        "boro": "Queens",
+        "grade": "A",
+        "score": 0,
+        "source": "semantic_search",
+        "liked_at": "2026-04-30T23:24:14"
+      }
+    ],
+    "created_at": "2026-04-30T23:05:41",
+    "updated_at": "2026-04-30T23:26:23",
+    "password_hash": "809f5bd309cdd79c996a9ea783e6d672dde6c0fdfc8df56b13d1ff4750ca62b7",
+    "salt": "d2903283cfe0f2f3e2ebdb0465c7c28f"
   }
 }

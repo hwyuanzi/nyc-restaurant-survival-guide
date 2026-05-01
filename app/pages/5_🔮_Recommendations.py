@@ -107,6 +107,19 @@ def persist_liked_entries(profile_id, liked_entries, raw_df):
     return profile
 
 
+def remove_liked_entry(profile_id, liked_entries, edit_restaurant_id, raw_df):
+    if not edit_restaurant_id:
+        return
+
+    updated_liked_entries = [
+        entry for entry in liked_entries if entry["restaurant_id"] != edit_restaurant_id
+    ]
+    st.session_state["recommendations_liked_entries"] = updated_liked_entries
+    st.session_state["recommendations_edit_restaurant_id"] = None
+    persist_liked_entries(profile_id, updated_liked_entries, raw_df)
+    st.session_state["recommendations_status_message"] = "Liked restaurant removed."
+
+
 def liked_centroid_vector(liked_vectors: np.ndarray, fallback_vector: np.ndarray) -> np.ndarray:
     if liked_vectors is None or len(liked_vectors) == 0:
         return fallback_vector
@@ -226,6 +239,11 @@ with st.sidebar:
         liked_entries_df = pd.DataFrame(liked_entries)
         liked_borough_options = ["All"] + get_valid_borough_options(liked_entries_df)
         liked_cuisine_options = ["All"] + get_valid_cuisine_options(liked_entries_df, column="cuisine_type")
+        if st.session_state.get("liked_boro_filter") not in liked_borough_options:
+            st.session_state["liked_boro_filter"] = "All"
+        if st.session_state.get("liked_cuisine_filter") not in liked_cuisine_options:
+            st.session_state["liked_cuisine_filter"] = "All"
+
         liked_boro_filter = st.selectbox("Liked borough filter", liked_borough_options, key="liked_boro_filter")
         liked_cuisine_filter = st.selectbox("Liked cuisine filter", liked_cuisine_options, key="liked_cuisine_filter")
 
@@ -247,9 +265,12 @@ with st.sidebar:
         edit_restaurant_id = None
         selected_edit_entry = None
         if editable_entries:
+            edit_options = [entry["restaurant_id"] for entry in editable_entries]
+            if st.session_state.get("recommendations_edit_restaurant_id") not in edit_options:
+                st.session_state["recommendations_edit_restaurant_id"] = None
             edit_restaurant_id = st.selectbox(
                 "Edit a liked restaurant",
-                options=[entry["restaurant_id"] for entry in editable_entries],
+                options=edit_options,
                 format_func=lambda rid: next(
                     (
                         entry["name"]
@@ -260,20 +281,25 @@ with st.sidebar:
                 ),
                 index=None,
                 placeholder="Select a liked restaurant",
+                key="recommendations_edit_restaurant_id",
             )
             selected_edit_entry = next(
                 (entry for entry in editable_entries if entry["restaurant_id"] == edit_restaurant_id),
                 None,
             )
 
-        if st.button("Remove like", use_container_width=True, disabled=not edit_restaurant_id):
-            liked_entries = [
-                entry for entry in liked_entries if entry["restaurant_id"] != edit_restaurant_id
-            ]
-            st.session_state["recommendations_liked_entries"] = liked_entries
-            profile = persist_liked_entries(profile_id, liked_entries, raw_df)
-            st.success("Liked restaurant removed.")
-            st.rerun()
+        if st.button(
+            "Remove like",
+            use_container_width=True,
+            disabled=not edit_restaurant_id,
+            on_click=remove_liked_entry,
+            args=(profile_id, liked_entries, edit_restaurant_id, raw_df),
+        ):
+            pass
+
+        status_message = st.session_state.pop("recommendations_status_message", None)
+        if status_message:
+            st.success(status_message)
     else:
         st.caption("You have not liked any restaurants yet. Add a few above to personalize recommendations.")
 
