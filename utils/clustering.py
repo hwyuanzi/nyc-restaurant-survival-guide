@@ -611,29 +611,13 @@ def _humanize_feature(feature_name):
 
 
 def _component_axis_label(component, feature_columns):
-    """Generate a human-readable PCA axis label from the top-2 feature loadings."""
+    """Generate a human-readable PCA axis label from the top individual feature loadings."""
     weights = pd.Series(np.abs(component), index=feature_columns)
-    category_weights = weights.groupby(
-        [_feature_category(name) for name in feature_columns]
-    ).sum().sort_values(ascending=False)
-    primary = category_weights.index[0] if not category_weights.empty else "Pattern"
-    secondary = category_weights.index[1] if len(category_weights) > 1 else None
-
-    category_display = {
-        "Cuisine": "Cuisine Type",
-        "Borough": "Geographic Area",
-        "Price": "Price Level",
-        "Quality": "Quality & Popularity",
-        "Location": "Geographic Location",
-        "Affinity": "User Match",
-        "Other": "Mixed Factors",
-    }
-    p_label = category_display.get(primary, primary)
-    s_label = category_display.get(secondary, "") if secondary else ""
-
-    if secondary and secondary != primary:
-        return f"{p_label} vs {s_label}"
-    return p_label
+    top2 = weights.nlargest(2)
+    labels = [_humanize_feature(name) for name in top2.index]
+    if len(labels) >= 2 and labels[0] != labels[1]:
+        return f"{labels[0]} / {labels[1]}"
+    return labels[0] if labels else "Mixed"
 
 
 def _component_summary(component, feature_columns):
@@ -1317,6 +1301,15 @@ def cache_is_fresh(algorithm: str = "kmeans"):
     if not os.path.exists(cache_path):
         return False
     return (time.time() - os.path.getmtime(cache_path)) < CACHE_TTL
+
+
+def get_pca_axis_labels(pca_model) -> list[str]:
+    """Recompute axis labels from a PCA model's components at runtime (bypasses stale cache values)."""
+    feature_cols = getattr(pca_model, "feature_columns_", None)
+    if feature_cols is None or pca_model.components_ is None:
+        return [f"PC{i+1}" for i in range(3)]
+    n = min(3, len(pca_model.components_))
+    return [_component_axis_label(pca_model.components_[i], feature_cols) for i in range(n)]
 
 
 def load_cache(algorithm: str = "kmeans"):

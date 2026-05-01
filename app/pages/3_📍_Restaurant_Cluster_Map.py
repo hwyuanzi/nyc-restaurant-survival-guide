@@ -10,7 +10,7 @@ from plotly.subplots import make_subplots
 
 from app.ui_utils import apply_apple_theme
 from utils.clustering import (
-    get_clustered_data, find_optimal_k, compute_silhouette,
+    get_clustered_data, find_optimal_k,
     find_silhouette_knee, find_inertia_elbow, CLUSTER_SCHEMA_VERSION,
 )
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
@@ -122,13 +122,8 @@ with st.sidebar:
         st.session_state["active_cluster_request"] = cluster_request
         st.session_state["optimal_k"] = int(k)
 
-    if st.button("🔄 Re-run Clustering"):
-        st.session_state["clustered_df"] = None
-        st.session_state["kmeans_model"] = None
-
     st.markdown("---")
     st.markdown("### Map Controls")
-    layer_type   = st.radio("Layer type", ["3D Columns", "Scatter Dots"])
     height_metric = st.selectbox("Column height by", ["avg_rating", "review_count", "user_affinity_score", "price_tier"])
     map_style_name = st.selectbox("Map style", ["Dark", "Light"])
 
@@ -168,46 +163,6 @@ if predicted_cluster != -1:
     n_match  = len(cdf[cdf["cluster_id"] == predicted_cluster])
     st.success(f"🎯 Based on your history, you belong to **{cl_label}** — {n_match} restaurants match your taste profile.")
 
-# ── Algorithm comparison expander ────────────────────────────────────────────
-with st.expander("🔬 Compare clustering algorithms on this dataset"):
-    st.caption(
-        "Silhouette score measures how tight clusters are (higher = better, "
-        "−1 to 1).  Label diversity is a rough interpretability proxy — the "
-        "top 3 auto-generated cluster labels by restaurant count.  All three "
-        "algorithms cluster the same 18-dim interpretable feature space "
-        "(6 numeric signals + 7 cuisine-group indicators + 5 borough indicators)."
-    )
-    run_compare = st.button("Run comparison (≈30s–1min)")
-    if run_compare:
-        comparison_rows = []
-        progress = st.progress(0.0, text="Starting…")
-        algos_to_run = [("kmeans", "K-Means"), ("gmm", "GMM (tied)"),
-                        ("agglomerative", "Hierarchical (Ward)")]
-        for i, (algo_key, algo_name) in enumerate(algos_to_run):
-            progress.progress(i / len(algos_to_run), text=f"Running {algo_name}…")
-            try:
-                summary = compute_silhouette(raw_df, user_history, algo_key, k=k)
-                comparison_rows.append({
-                    "Algorithm": algo_name,
-                    "Silhouette": round(summary["silhouette"], 4),
-                    "Clusters": summary["n_clusters"],
-                    "Top labels": " · ".join(summary["top_labels"]),
-                })
-            except Exception as exc:
-                comparison_rows.append({
-                    "Algorithm": algo_name,
-                    "Silhouette": float("nan"),
-                    "Clusters": 0,
-                    "Top labels": f"⚠️ error: {exc}",
-                })
-        progress.progress(1.0, text="Done.")
-        st.session_state["cluster_comparison"] = comparison_rows
-    if st.session_state.get("cluster_comparison"):
-        df_cmp = pd.DataFrame(st.session_state["cluster_comparison"])
-        st.dataframe(df_cmp, use_container_width=True, hide_index=True)
-        best = df_cmp.loc[df_cmp["Silhouette"].idxmax(), "Algorithm"] if not df_cmp["Silhouette"].isna().all() else None
-        if best:
-            st.caption(f"Best by silhouette on K={k}: **{best}**")
 
 # ── K-selection analysis (shown after "Find Optimal K" is clicked) ────────────
 _k_scores = st.session_state.get("k_selection_scores")
@@ -428,31 +383,18 @@ tooltip = {
     "style": {"backgroundColor": "#1a1a2e", "color": "white", "fontSize": "13px", "padding": "8px 12px", "borderRadius": "8px"},
 }
 
-if layer_type == "3D Columns":
-    layer = pdk.Layer(
-        "ColumnLayer",
-        data=map_df,
-        get_position="[lng, lat]",
-        get_elevation="elevation_value",
-        elevation_scale=1,
-        radius=60,
-        get_fill_color="cluster_color_rgba",
-        pickable=True,
-        auto_highlight=True,
-        extruded=True,
-    )
-else:
-    layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=map_df,
-        get_position="[lng, lat]",
-        get_color="cluster_color_rgba",
-        get_radius="scaled_radius",
-        radius_min_pixels=3,
-        radius_max_pixels=20,
-        pickable=True,
-        auto_highlight=True,
-    )
+layer = pdk.Layer(
+    "ColumnLayer",
+    data=map_df,
+    get_position="[lng, lat]",
+    get_elevation="elevation_value",
+    elevation_scale=1,
+    radius=60,
+    get_fill_color="cluster_color_rgba",
+    pickable=True,
+    auto_highlight=True,
+    extruded=True,
+)
 
 deck = pdk.Deck(
     layers=[layer],
@@ -494,7 +436,3 @@ for i, cid in enumerate(unique_clusters):
         """, unsafe_allow_html=True)
         if story:
             st.caption(story)
-        if st.button(f"Explore →", key=f"explore_{cid}"):
-            st.session_state["pending_map_cluster_filter_ids"] = [int(cid)]
-            st.session_state["selected_cluster_label"] = label
-            st.rerun()

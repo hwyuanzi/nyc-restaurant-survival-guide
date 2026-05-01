@@ -1,26 +1,20 @@
 """
 Page 2 — Health Grade Risk Classifier
- 
-Pick a restaurant from the DOHMH held-out test set, hit the button, get the
-estimated grade-risk category (A / B / C) with class probabilities.
- 
-What makes this version different from our earlier sandbox:
-  1. We removed all score-derived features from the training set, because
-     the DOHMH grade is *derived* from the inspection score.  Keeping them
-     was label leakage — the model hit 99% accuracy not by learning
-     anything useful but by rediscovering a known threshold rule.  See the
-     "🔍 Why we dropped score features" section below.
-  2. We show the 25-dim feature vector that actually enters the MLP, so
-     the audience sees the input isn't a restaurant name — it's a numeric
-     vector derived from violation history, borough, and cuisine.
-  3. We show permutation importance so the audience can verify *which*
-     features the model actually relies on.  This is stronger evidence
-     than PCA for "what matters to predictions" because PCA measures
-     variance, not predictive power.
- 
-This is a held-out restaurant-profile classifier, not a strict future-grade
-forecasting model.  A future forecasting setup would use only inspections
-before time t to predict the next inspection grade at time t.
+
+Pick a restaurant from the DOHMH held-out test set and see the MLP's
+estimated grade-risk category (A / B / C) with class probabilities,
+a what-if explorer, and permutation importance.
+
+Key design choices:
+  1. Score-derived features (latest_score, avg_score, etc.) are excluded
+     because the DOHMH letter grade is *derived* from those scores —
+     keeping them causes label leakage and inflated accuracy.
+  2. Permutation importance shows which feature groups the model actually
+     relies on (vs. PCA variance, which measures spread, not predictive
+     power).
+
+This is a held-out restaurant-profile classifier, not a future-grade
+forecasting model.
 
 Data:   data/train.csv + data/test.csv
 Model:  models/custom_mlp.py — cached at data/cache/health_classifier.pt
@@ -43,7 +37,6 @@ from sklearn.model_selection import train_test_split
  
 from app.ui_utils import apply_apple_theme
 from models.custom_mlp import CustomMLP, TrainingHistory, evaluate_mlp, train_mlp
-from models.pca_scratch import PCAScratch
 from utils.user_profile import init_session_state
  
  
@@ -308,24 +301,6 @@ def _probability_delta_rows(before: np.ndarray, after: np.ndarray) -> pd.DataFra
     })
 
 
-@st.cache_data(show_spinner=False)
-def compute_pca_context():
-    """Project the held-out feature vectors with our NumPy PCA implementation."""
-    X_test = test_df[feature_cols].values.astype(np.float64)
-    pca = PCAScratch(n_components=2)
-    coords = pca.fit_transform(X_test)
-    return {
-        "coords": coords,
-        "mean": pca.mean_,
-        "components": pca.components_,
-        "explained": pca.explained_variance_ratio_,
-    }
-
-
-def transform_with_cached_pca(feature_matrix: np.ndarray, pca_payload: dict) -> np.ndarray:
-    return (np.asarray(feature_matrix, dtype=np.float64) - pca_payload["mean"]) @ pca_payload["components"].T
-
-
 def local_sensitivity(feature_row: np.ndarray) -> pd.DataFrame:
     """Rank numeric features by how much moving toward the Grade-A median changes P(A)."""
     base_probs = predict_grade(feature_row)
@@ -521,9 +496,32 @@ with st.expander("🔍 Why we dropped inspection-score features from training", 
 # ---------------------------------------------------------------------------
  
 st.subheader("1️⃣ Pick a Restaurant")
- 
+
+st.markdown(
+    f"""
+    The **{len(meta_test):,} restaurants** listed here are the **held-out DOHMH test set** —
+    a fixed split that was never shown to the model during training or model selection.
+    This is intentionally a subset of all NYC restaurants, for three reasons:
+
+    1. **Evaluation integrity** — Section 4 reports accuracy and F1 on this exact set.
+       If training restaurants were included, the reported metrics would be inflated
+       (the model would have already "seen" those examples).
+    2. **Known ground truth** — every restaurant here has an official DOHMH letter grade
+       on record, so Section 2 can always compare the model's prediction against the real
+       outcome.  The training set of {len(train_df):,} restaurants is excluded to keep
+       evaluation honest.
+    3. **No semantic search** — the classifier never reads restaurant names, addresses, or
+       free-text descriptions.  Its only input is a **{input_dim}-dimensional numeric
+       vector**: 3 standardized inspection-history features (`num_violations`,
+       `num_inspections`, `violations_per_inspection`) plus 6 borough one-hots and 16
+       cuisine one-hots.  There is no text embedding involved, so a semantic search
+       query would have nothing to match against.  The substring filter below is the
+       right tool for navigating these structured records.
+    """
+)
+
 query = st.text_input(
-    "Search by name, borough, or cuisine",
+    "Filter by name, borough, or cuisine (substring match)",
     placeholder="e.g. pizza · Queens · Joe's",
 )
  
@@ -855,168 +853,6 @@ if pred_grade != "A" or true_grade != "A":
             "depend on future inspections and official score thresholds."
         )
 
-with st.expander("🧭 PCA context map: where this profile sits", expanded=False):
-    st.caption(
-        "This uses the project's NumPy PCA implementation to visualize the held-out feature "
-        "space.  PCA shows broad data geometry; improvement advice above comes from the MLP "
-        "counterfactual search, not from PCA alone."
-    )
-    pca_payload = compute_pca_context()
-    coords = pca_payload["coords"]
-    selected_matches = meta_test.index[meta_test["camis"] == selected["camis"]].tolist()
-    selected_idx = selected_matches[0] if selected_matches else 0
-    edited_coord = transform_with_cached_pca(edited_row.reshape(1, -1), pca_payload)[0]
-
-    pca_fig = go.Figure()
-    pca_fig.add_trace(go.Scattergl(
-        x=coords[:, 0],
-        y=coords[:, 1],
-        mode="markers",
-        marker=dict(
-            size=6,
-            color=[GRADE_COLORS.get(g, "#8E8E93") for g in meta_test["grade"].tolist()],
-            opacity=0.45,
-        ),
-        text=meta_test["dba"],
-        hovertemplate="%{text}<extra></extra>",
-        name="Held-out restaurants",
-    ))
-    pca_fig.add_trace(go.Scatter(
-        x=[coords[selected_idx, 0]],
-        y=[coords[selected_idx, 1]],
-        mode="markers+text",
-        marker=dict(size=15, color="#111111", symbol="star"),
-        text=["Original"],
-        textposition="top center",
-        name="Original profile",
-    ))
-    pca_fig.add_trace(go.Scatter(
-        x=[edited_coord[0]],
-        y=[edited_coord[1]],
-        mode="markers+text",
-        marker=dict(size=15, color="#007AFF", symbol="diamond"),
-        text=["Edited"],
-        textposition="bottom center",
-        name="Edited profile",
-    ))
-    pca_fig.update_layout(
-        title=(
-            f"PCA projection of model inputs "
-            f"(PC1 {pca_payload['explained'][0] * 100:.1f}%, "
-            f"PC2 {pca_payload['explained'][1] * 100:.1f}% variance)"
-        ),
-        xaxis_title="PC1", yaxis_title="PC2",
-        height=440, margin=dict(l=20, r=20, t=60, b=40),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font_family="Inter, -apple-system, sans-serif",
-    )
-    st.plotly_chart(pca_fig, use_container_width=True)
- 
- 
-# ---------------------------------------------------------------------------
-# Section 2.5 — What the model actually sees (input vector transparency)
-# ---------------------------------------------------------------------------
- 
-st.markdown("---")
-with st.expander("🔢 What the model actually sees (input feature vector)", expanded=False):
- 
-    numeric_features_in_config = [c for c in feature_config.get("numerical_features", []) if c in feature_cols]
-    num_count = len(numeric_features_in_config)
-    onehot_count = input_dim - num_count
- 
-    st.markdown(
-        f"""
-        **The MLP doesn't read restaurant names or addresses.**  It takes a
-        **{input_dim}-dimensional numeric vector** derived from the
-        restaurant's inspection history + location + cuisine.  Below is
-        the exact vector fed into the network to produce the prediction
-        above.
- 
-        - **Numeric features** ({num_count} dims) are *z-score standardized*:
-          `0` means citywide average, positive = higher than average,
-          negative = lower.  E.g. `num_violations = +1.8` means this
-          restaurant has violation count 1.8 standard deviations **above**
-          the citywide mean.
-        - **One-hot features** ({onehot_count} dims) are `1` if active,
-          `0` otherwise.  Exactly one borough and one cuisine should be `1`.
-        """
-    )
- 
-    NUMERIC_DESCRIPTIONS = {
-        "num_inspections": "Total inspections on record (how established this restaurant is).",
-        "num_violations": "Total violations across all inspections.",
-        "violations_per_inspection": "Average violations per inspection visit.",
-    }
- 
-    feature_display_rows = []
-    for col_name, value in zip(feature_cols, feature_row):
-        if col_name in numeric_features_in_config:
-            feature_display_rows.append({
-                "Dim": col_name, "Value": f"{value:+.2f}",
-                "Type": "📊 Numeric",
-                "Meaning": NUMERIC_DESCRIPTIONS.get(col_name, "Standardized numeric feature."),
-            })
-        elif col_name.startswith("boro_"):
-            feature_display_rows.append({
-                "Dim": col_name, "Value": str(int(round(value))),
-                "Type": "📍 Borough (one-hot)",
-                "Meaning": f"{'Yes' if value else 'No'} — {col_name.replace('boro_', '')}",
-            })
-        elif col_name.startswith("cuisine_"):
-            feature_display_rows.append({
-                "Dim": col_name, "Value": str(int(round(value))),
-                "Type": "🍽️ Cuisine (one-hot)",
-                "Meaning": f"{'Yes' if value else 'No'} — {col_name.replace('cuisine_', '')}",
-            })
-    feature_table = pd.DataFrame(feature_display_rows)
-    numeric_rows = feature_table[feature_table["Type"].str.contains("Numeric")]
-    onehot_rows = feature_table[~feature_table["Type"].str.contains("Numeric")]
-    active_onehots = onehot_rows[onehot_rows["Value"] == "1"]
- 
-    col_num, col_active = st.columns([1, 1])
-    with col_num:
-        st.markdown("**📊 Numeric features (standardized)**")
-        st.dataframe(numeric_rows[["Dim", "Value", "Meaning"]],
-                     use_container_width=True, hide_index=True, height=200)
-    with col_active:
-        st.markdown("**🟦 Active one-hot features (only the `1`s)**")
-        if active_onehots.empty:
-            st.caption("No active one-hot features.")
-        else:
-            st.dataframe(active_onehots[["Dim", "Meaning"]],
-                         use_container_width=True, hide_index=True, height=200)
-        st.caption(
-            f"The other {len(onehot_rows) - len(active_onehots)} one-hot "
-            f"features are all `0`."
-        )
- 
-    st.markdown("**📉 This restaurant vs. citywide average**")
-    st.caption(
-        "Each bar shows how many standard deviations this restaurant's "
-        "feature sits from the citywide mean.  Positive = above average."
-    )
-    numeric_values = [float(v.replace("+", "")) for v in numeric_rows["Value"]]
-    numeric_names = numeric_rows["Dim"].tolist()
-    bar_colors = ["#FF3B30" if v > 0.5 else "#FFCC00" if v > 0 else "#34C759"
-                  for v in numeric_values]
-    comparison_fig = go.Figure(go.Bar(
-        x=numeric_values, y=numeric_names, orientation="h",
-        marker_color=bar_colors,
-        text=[f"{v:+.2f}σ" for v in numeric_values],
-        textposition="outside",
-    ))
-    comparison_fig.update_layout(
-        height=max(200, 60 * len(numeric_names)),
-        margin=dict(l=20, r=40, t=10, b=20),
-        xaxis=dict(title="Standardized value (σ)", zeroline=True,
-                   zerolinecolor="#888", zerolinewidth=1),
-        yaxis=dict(autorange="reversed"),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font_family="Inter, -apple-system, sans-serif",
-    )
-    st.plotly_chart(comparison_fig, use_container_width=True)
- 
- 
 # ---------------------------------------------------------------------------
 # Section 4 — Held-out test set performance + feature importance
 # ---------------------------------------------------------------------------

@@ -138,52 +138,69 @@ min_rating = 0.0
 top_k = 8
 force_refresh = False
 
-st.title("🍽️ NYC Restaurant Recommender")
-st.markdown("Find NYC restaurants using semantic search, saved likes, health inspection context, and interpretable restaurant clusters.")
+st.title("🍽️ NYC Restaurant Survival Guide")
+st.caption("CSCI-UA 473 · Fundamentals of Machine Learning · NYU Spring 2026")
+st.markdown(
+    "An end-to-end ML dashboard combining NYC Department of Health inspection data, "
+    "Google Places metadata, semantic search, a health-risk classifier, interpretable clustering, "
+    "PCA visualization, and liked-history recommendations."
+)
 
 hero_left, hero_right = st.columns([3, 2])
 with hero_left:
-    st.subheader("What This App Does")
+    st.subheader("What's Inside")
     st.markdown(
         """
-        This app combines NYC inspection data, Google Places enrichment, and a persistent user profile to help each user discover restaurants they are more likely to enjoy.
+        **Data** — 14,252 NYC DOHMH inspection records (train + test) enriched with 2,835 Google Places rows including ratings, reviews, price tier, and photos.
 
-        It includes:
-        - Liked-history recommendations using nearest neighbors, rank fusion, and diversity reranking
-        - A semantic search page that understands cravings and occasions
-        - A Restaurant Cluster GIS Map showing learned restaurant segments across NYC
-        - A profile survey plus saved likes so recommendations improve over time
+        **ML algorithms implemented from scratch:**
+        - K-Means++ (`models/kmeans_scratch.py`) — default clustering engine
+        - PCA (`models/pca_scratch.py`) — used in classifier context plots
+        - Custom MLP (`models/custom_mlp.py`) — 3-layer PyTorch health grade classifier
+
+        **Retrieval & recommendations:**
+        - Semantic search via `sentence-transformers/all-mpnet-base-v2` + cosine similarity
+        - Personalized recommendations with per-liked KNN → Reciprocal Rank Fusion → MMR reranking
         """
     )
 with hero_right:
     st.info(
         """
-        **Best flow**
+        **Suggested flow**
 
-        1. Search or browse restaurants you already like and save them
-        2. Visit **Recommendations** to get liked-history picks
-        3. Use the search box below for specific cravings
-        4. Explore **Restaurant Cluster GIS Map** to understand learned restaurant segments
+        1. Like restaurants you enjoy from search results or the Semantic Search page
+        2. Visit **Recommendations** for liked-history picks
+        3. Open **Health Grade Classifier** to explore inspection risk signals
+        4. Browse **Restaurant Cluster GIS Map** to see learned NYC segments
+        5. Dive into **PCA Embedding Explorer** for cluster interpretation
         """
     )
 
 st.markdown("---")
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
-    st.subheader("🔮 Recommendations")
-    st.write("Get restaurant recommendations from your saved likes using per-liked nearest neighbors, rank fusion, and diversity reranking.")
+    st.markdown("**🔍 Semantic Search**")
+    st.caption("Natural-language restaurant search using transformer embeddings and cosine similarity, with cuisine and neighborhood query hints.")
 with col2:
-    st.subheader("🔎 Semantic Search")
-    st.write("Describe what you want in plain English and get search results ranked using embeddings, keyword overlap, restaurant quality, and your user profile.")
+    st.markdown("**🧪 Health Classifier**")
+    st.caption("Select a held-out DOHMH restaurant, view A/B/C risk probabilities, edit inspection features, and find a path toward Grade A.")
 with col3:
-    st.subheader("📍 Cluster GIS Map")
-    st.write("View restaurants across NYC, colored by clusters learned from cuisine, price, rating, health, borough, and location signals.")
+    st.markdown("**📍 Cluster Map**")
+    st.caption("K-Means from scratch on an 18-D interpretable feature space (price, rating, cuisine, borough, location). K=9 learned clusters on a real NYC map.")
+with col4:
+    st.markdown("**📊 PCA Explorer**")
+    st.caption("3D PCA, centroid-distance view, and t-SNE; feature loadings, explained variance, cluster distance matrix, and prototype restaurants.")
+with col5:
+    st.markdown("**🔮 Recommendations**")
+    st.caption("Like restaurants from any page, then get personalized picks via per-liked KNN + RRF + MMR diversity reranking.")
 
 st.markdown("---")
-st.subheader("Performance Improvements")
+st.subheader("Runtime Data")
 st.write(
-    "Search data is now prepared into local disk artifacts in `data/cache`, including Google-enriched restaurants, descriptions, and embeddings, so later app launches can open directly into a ready-to-search state."
+    "Committed caches in `data/cache/` — Google-enriched restaurant table, 768-D embeddings, "
+    "K-Means model, and health classifier checkpoint — let the app run offline without rebuilding anything. "
+    "The status panel below shows what's loaded for this session."
 )
 
 api_key = get_google_api_key()

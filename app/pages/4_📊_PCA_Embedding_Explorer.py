@@ -12,8 +12,8 @@ from sklearn.metrics import silhouette_score
 from app.ui_utils import apply_apple_theme
 from utils.clustering import (
     build_feature_matrix,
-    compute_silhouette,
     get_clustered_data,
+    get_pca_axis_labels,
     prepare_clustering_space,
 )
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
@@ -22,7 +22,6 @@ from utils.user_profile import (
     get_valid_borough_options,
     get_valid_cuisine_options,
     init_session_state,
-    predict_user_cluster,
     profile_to_user_history,
 )
 
@@ -85,11 +84,9 @@ with st.sidebar:
         f"Shared clustering setup: `{algo_display}` with `K = {k}`. "
         "Change these on the GIS Map page; this page mirrors the same clustering result."
     )
-    color_by       = st.selectbox("Color by", ["Cluster", "Cuisine type", "Price tier", "Rating"])
-    size_by        = st.selectbox("Size by", ["Review count", "User affinity score", "Uniform"])
-    highlight_mode = st.toggle("Highlight my cluster only", value=False)
-    show_user      = st.toggle("Show my position", value=True)
-    show_axes      = st.toggle("Show axis labels", value=True)
+    color_by  = st.selectbox("Color by", ["Cluster", "Cuisine type", "Price tier", "Rating"])
+    size_by   = st.selectbox("Size by", ["Review count", "User affinity score", "Uniform"])
+    show_axes = st.toggle("Show axis labels", value=True)
 
     st.markdown("---")
     st.markdown("### Data Filters")
@@ -115,13 +112,6 @@ with st.spinner(f"Running {algo_display}..."):
     st.session_state["scaler"]       = scaler
     st.session_state["pca_model"]    = pca
 
-predicted_cluster = predict_user_cluster(user_history, cdf, kmeans, scaler)
-st.session_state["predicted_cluster"] = predicted_cluster
-
-if predicted_cluster != -1:
-    cl_label = cdf[cdf["cluster_id"] == predicted_cluster]["cluster_label"].iloc[0]
-    st.success(f"🎯 Your predicted cluster: **{cl_label}**")
-
 X_features, feature_columns, clustered_features_df = build_feature_matrix(cdf)
 X_scaled_cluster, X_cluster_space, _ = prepare_clustering_space(X_features, scaler=scaler, fit=False)
 distance_matrix = kmeans.transform(X_cluster_space)
@@ -130,7 +120,7 @@ cdf["distance_to_centroid"] = distance_matrix[np.arange(len(cdf)), cdf["cluster_
 
 # ── Dot sizing ────────────────────────────────────────────────────────────────
 pca_model = st.session_state.get("pca_model")
-pca_axis_labels = getattr(pca_model, "axis_labels_", ["PC1", "PC2", "PC3"]) if pca_model is not None else ["PC1", "PC2", "PC3"]
+pca_axis_labels = get_pca_axis_labels(pca_model) if pca_model is not None else ["PC1", "PC2", "PC3"]
 pca_component_summaries = getattr(pca_model, "component_summaries_", ["", "", ""]) if pca_model is not None else ["", "", ""]
 
 with st.sidebar:
@@ -194,8 +184,6 @@ if color_by == "Cluster":
     for cid in sorted(plot_df["cluster_id"].unique()):
         subset = plot_df[plot_df["cluster_id"] == cid]
         label  = subset["cluster_label"].iloc[0]
-        is_user_cluster = (cid == predicted_cluster)
-        opacity = 1.0 if (not highlight_mode or is_user_cluster) else 0.1
 
         fig.add_trace(go.Scatter3d(
             x=subset["plot_x"], y=subset["plot_y"], z=subset["plot_z"],
@@ -204,7 +192,7 @@ if color_by == "Cluster":
             marker=dict(
                 size=subset["dot_size"],
                 color=CLUSTER_HEX[cid % len(CLUSTER_HEX)],
-                opacity=opacity,
+                opacity=0.8,
                 line=dict(width=0),
             ),
             hovertemplate=(
@@ -264,18 +252,6 @@ else:
             ),
             customdata=plot_df[["name", "cuisine_type", "price_tier", "avg_rating", "grade"]].values,
         ))
-
-# User position marker
-if show_user and predicted_cluster != -1:
-    user_pos = plot_df[plot_df["cluster_id"] == predicted_cluster][["plot_x", "plot_y", "plot_z"]].mean()
-    fig.add_trace(go.Scatter3d(
-        x=[user_pos["plot_x"]], y=[user_pos["plot_y"]], z=[user_pos["plot_z"]],
-        mode="markers+text",
-        name="You",
-        text=["📍 You"],
-        textposition="top center",
-        marker=dict(size=14, color="white", symbol="diamond", line=dict(color="#6c8fff", width=3)),
-    ))
 
 if show_axes:
     if projection_mode == "Principal Components":
@@ -354,88 +330,105 @@ _m3.metric("K (clusters)", k)
 _m4.metric("Largest Cluster Share", f"{largest_cluster_share * 100:.1f}%",
            help="Checks whether one cluster is swallowing the dataset. Lower is usually easier to interpret.")
 
-with st.expander("🔬 Compare clustering algorithms on this dataset"):
-    st.caption(
-        "This is the same comparison logic as the GIS map. Use it to argue why your chosen algorithm is a reasonable modeling choice."
-    )
-    run_compare = st.button("Run comparison for this page", key="pca_compare_btn")
-    if run_compare:
-        comparison_rows = []
-        progress = st.progress(0.0, text="Starting…")
-        algos_to_run = [("kmeans", "K-Means"), ("gmm", "GMM (tied)"), ("agglomerative", "Hierarchical (Ward)")]
-        for i, (algo_key, algo_name) in enumerate(algos_to_run):
-            progress.progress(i / len(algos_to_run), text=f"Running {algo_name}…")
-            try:
-                summary = compute_silhouette(raw_df, user_history, algo_key, k=k)
-                comparison_rows.append({
-                    "Algorithm": algo_name,
-                    "Silhouette": round(summary["silhouette"], 4),
-                    "Clusters": summary["n_clusters"],
-                    "Top labels": " · ".join(summary["top_labels"]),
-                })
-            except Exception as exc:
-                comparison_rows.append({
-                    "Algorithm": algo_name,
-                    "Silhouette": float("nan"),
-                    "Clusters": 0,
-                    "Top labels": f"⚠️ error: {exc}",
-                })
-        progress.progress(1.0, text="Done.")
-        st.session_state["pca_cluster_comparison"] = comparison_rows
-    if st.session_state.get("pca_cluster_comparison"):
-        cmp_df = pd.DataFrame(st.session_state["pca_cluster_comparison"])
-        st.dataframe(cmp_df, use_container_width=True, hide_index=True)
-
-# ── PCA component interpretation ─────────────────────────────────────────────
-if pca_model is not None:
-    st.markdown("---")
-    st.subheader("What The Principal Components Mean")
-    component_cols = st.columns(3)
-    for idx, col in enumerate(component_cols):
-        with col:
-            st.metric(f"PC{idx + 1}", pca_axis_labels[idx] if idx < len(pca_axis_labels) else f"PC{idx + 1}")
-            if idx < len(pca_component_summaries) and pca_component_summaries[idx]:
-                st.caption(pca_component_summaries[idx])
-
-# ── Feature loadings per component ───────────────────────────────────────────
+# ── PCA component interpretation + loadings (merged, vertical) ───────────────
 _feature_cols = getattr(pca_model, "feature_columns_", None) if pca_model is not None else None
-if _feature_cols and pca_model is not None and pca_model.components_ is not None:
+
+if pca_model is not None and _feature_cols and pca_model.components_ is not None:
     st.markdown("---")
-    st.subheader("Top Feature Loadings per Component")
+    st.subheader("Principal Components: Interpretation & Feature Loadings")
     st.caption(
-        "Each bar shows how strongly a raw feature drives the component. "
-        "Blue = positive loading (high feature value → high PC score); "
-        "red = negative loading."
+        "PCA finds orthogonal axes that capture the most variance in the 18-dimensional "
+        "feature space. Each PC is a weighted combination of all input features. "
+        "The bar chart shows the **top 8 features by absolute loading** — "
+        "blue = positive (high feature value pushes the PC score up), "
+        "red = negative (high feature value pushes the PC score down). "
+        "These 3 PCs are used only for the 3D scatter above; the actual clustering "
+        "runs on a higher-dimensional PCA subspace (≥ 92% variance retained)."
     )
+
+    def _fmt(name: str) -> str:
+        name = name.replace("_norm", "").replace("_", " ")
+        if name.startswith("cuisine "):
+            return name.replace("cuisine ", "") + " cuisine"
+        if name.startswith("boro "):
+            return name.replace("boro ", "") + " borough"
+        return name.title()
+
     _n_pcs = min(3, len(pca_model.components_))
-    _load_cols = st.columns(_n_pcs)
-    for _pc_idx, _load_col in enumerate(_load_cols):
+    for _pc_idx in range(_n_pcs):
+        st.markdown("---")
         _loadings = pd.Series(pca_model.components_[_pc_idx], index=_feature_cols)
-        _top_idx = _loadings.abs().nlargest(8).index
-        _top_loadings = _loadings[_top_idx]
-        _pc_label = pca_axis_labels[_pc_idx] if _pc_idx < len(pca_axis_labels) else f"PC{_pc_idx+1}"
-        _colors = ["#6c8fff" if v >= 0 else "#ff6b8a" for v in _top_loadings.values]
-        _short_names = [
-            n.replace("cuisine_", "").replace("family_", "").replace("_norm", "").replace("_", " ").title()
-            for n in _top_idx
-        ]
-        _load_fig = go.Figure(go.Bar(
-            x=_top_loadings.values,
-            y=_short_names,
-            orientation="h",
-            marker_color=_colors,
-        ))
-        _load_fig.update_layout(
-            title=f"PC{_pc_idx+1}: {_pc_label}",
-            height=280,
-            margin=dict(l=0, r=0, t=40, b=0),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#e0e0f0", size=11),
-            xaxis=dict(gridcolor="#2a2a38", zeroline=True, zerolinecolor="#4a4a58"),
-            yaxis=dict(gridcolor="#2a2a38"),
-        )
-        with _load_col:
+        _var_pct = pca_model.explained_variance_ratio_[_pc_idx] * 100
+        _top8_idx = _loadings.abs().nlargest(8).index
+        _top8 = _loadings[_top8_idx]
+
+        _pos = _loadings[_loadings > 0.05].nlargest(3)
+        _neg = _loadings[_loadings < -0.05].nsmallest(3)
+        _pos_labels = [_fmt(n) for n in _pos.index]
+        _neg_labels = [_fmt(n) for n in _neg.index]
+
+        _col_text, _col_chart = st.columns([1, 1.4])
+
+        with _col_text:
+            st.markdown(f"#### PC{_pc_idx + 1} &nbsp; <span style='font-size:0.85rem;color:#7a7a9a'>({_var_pct:.1f}% of variance)</span>", unsafe_allow_html=True)
+
+            if _pos_labels:
+                st.markdown(
+                    "**High score →** restaurants with strong "
+                    + ", ".join(f"**{l}**" for l in _pos_labels[:3]) + " signals."
+                )
+            if _neg_labels:
+                st.markdown(
+                    "**Low score →** restaurants that lean toward "
+                    + ", ".join(f"**{l}**" for l in _neg_labels[:3]) + "."
+                )
+
+            _summary = pca_component_summaries[_pc_idx] if _pc_idx < len(pca_component_summaries) else ""
+            if _summary:
+                st.caption(f"Overall axis direction: {_summary.lower()}")
+
+            # Clarifying note for the first two PCs which both involve geographic features
+            if _pc_idx == 0:
+                st.info(
+                    "PC1 separates restaurants primarily by **which borough** they are in "
+                    "(discrete one-hot) and their **price tier**. "
+                    "It is a prestige/price axis, not a raw coordinate axis.",
+                    icon="ℹ️",
+                )
+            elif _pc_idx == 1:
+                st.info(
+                    "PC2 also involves geographic features, but captures **continuous "
+                    "lat/lng coordinates** (east–west spread) rather than borough identity. "
+                    "PC1 and PC2 are orthogonal — they explain different, non-overlapping "
+                    "variance in the data.",
+                    icon="ℹ️",
+                )
+
+        with _col_chart:
+            _colors = ["#6c8fff" if v >= 0 else "#ff6b8a" for v in _top8.values]
+            _short_names = [_fmt(n) for n in _top8_idx]
+            _load_fig = go.Figure(go.Bar(
+                x=_top8.values,
+                y=_short_names,
+                orientation="h",
+                marker_color=_colors,
+                text=[f"{v:+.3f}" for v in _top8.values],
+                textposition="outside",
+            ))
+            _load_fig.update_layout(
+                title=f"PC{_pc_idx + 1} — top 8 feature loadings",
+                height=300,
+                margin=dict(l=0, r=60, t=40, b=0),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#e0e0f0", size=11),
+                xaxis=dict(
+                    title="Loading magnitude",
+                    gridcolor="#2a2a38",
+                    zeroline=True, zerolinecolor="#555",
+                ),
+                yaxis=dict(gridcolor="#2a2a38", autorange="reversed"),
+            )
             st.plotly_chart(_load_fig, use_container_width=True)
 
 # ── Explained variance bar ────────────────────────────────────────────────────
@@ -514,18 +507,11 @@ st.caption(
     "To make the analysis defensible, each cluster is paired with a textual explanation, summary statistics, and prototype restaurants nearest to the centroid."
 )
 
-cluster_options = (
-    cdf[["cluster_id", "cluster_label"]]
-    .drop_duplicates()
-    .sort_values(["cluster_label", "cluster_id"])
-)
-default_cluster_id = predicted_cluster if predicted_cluster != -1 else int(cdf["cluster_id"].value_counts().idxmax())
-focus_cluster_id = default_cluster_id
+focus_cluster_id = int(cdf["cluster_id"].value_counts().idxmax())
 focus_df = cdf[cdf["cluster_id"] == focus_cluster_id].copy()
 focus_row = focus_df.iloc[0]
 
-label_prefix = "your current cluster" if predicted_cluster != -1 else "the largest cluster in the current analysis"
-st.info(f"Evidence for **{focus_row['cluster_label']}** ({label_prefix}): {focus_row.get('cluster_story', 'No explanation available.')}")
+st.info(f"Evidence for **{focus_row['cluster_label']}** (largest cluster): {focus_row.get('cluster_story', 'No explanation available.')}")
 if focus_row.get("cluster_cuisine_mix"):
     st.caption(f"🍽️ Cuisine mix: {focus_row['cluster_cuisine_mix']}")
 if focus_row.get("cluster_boro_mix"):

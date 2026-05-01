@@ -182,6 +182,16 @@ CUISINE_MATCH_ALIASES = {
     },
 }
 
+# Common words that add noise to lexical/keyword matching, especially in long queries
+_STOPWORDS = frozenset({
+    "and", "the", "for", "with", "that", "this", "are", "was", "were",
+    "have", "has", "had", "not", "but", "from", "they", "will", "would",
+    "can", "its", "into", "also", "very", "just", "like", "get", "all",
+    "some", "any", "you", "your", "our", "their", "each", "more", "most",
+    "great", "good", "nice", "want", "looking", "find", "near", "best",
+    "place", "places", "spot", "spots", "restaurant", "restaurants",
+})
+
 
 def stars(rating):
     if not rating:
@@ -277,7 +287,10 @@ def _count_token_matches(query_tokens, text):
     return matches
 
 def lexical_score(query, text):
-    query_tokens = {token for token in str(query).lower().split() if len(token) > 2}
+    query_tokens = {
+        token for token in str(query).lower().split()
+        if len(token) > 2 and token not in _STOPWORDS
+    }
     if not query_tokens or not str(text).strip():
         return 0.0
     matches = _count_token_matches(query_tokens, text)
@@ -419,7 +432,10 @@ def neighborhood_from_zipcode(zipcode):
 
 def _extract_query_intent(query):
     lowered = str(query or "").lower()
-    tokens = {token.strip(" ,.!?") for token in lowered.split() if token.strip(" ,.!?")}
+    tokens = {
+        t for t in (token.strip(" ,.!?") for token in lowered.split())
+        if t and t not in _STOPWORDS
+    }
     zipcodes_in_query = re.findall(r"\b\d{5}\b", lowered)
     matched_zipcode = next((zipcode for zipcode in zipcodes_in_query if zipcode in ZIPCODE_TO_NEIGHBORHOOD), None)
     borough = next((name.title() for name in BOROUGH_KEYWORDS if name in lowered), None)
@@ -533,7 +549,13 @@ def _extract_query_intent(query):
 def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min_rating, profile=None, min_match=0.45):
     profile = profile or {}
     profile_text = build_profile_prompt(profile)
-    expanded_query = f"{query}. {profile_text}".strip()
+    # For long queries the profile text can push important terms past the model's
+    # 384-token limit, degrading the embedding. Skip profile expansion when the
+    # raw query is already substantial.
+    if len(query) > 120:
+        expanded_query = query
+    else:
+        expanded_query = f"{query}. {profile_text}".strip()
     intent = _extract_query_intent(query)
 
     semantic_scores = np.zeros(len(df))
@@ -576,6 +598,18 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
                 cuisine_series.iloc[i],
                 f"{df['description'].iloc[i]} {summary_series.iloc[i]} {df['dba'].iloc[i]}",
             )
+            for i in range(len(df))
+        ])
+    # Strict cuisine field-only check — used for the relevance gate so that a
+    # restaurant whose *description* mentions a cuisine word but whose actual
+    # cuisine type doesn't match cannot pass the hard filter.
+    cuisine_field_boost = np.zeros(len(df))
+    if intent["desired_cuisines"]:
+        cuisine_field_boost = np.array([
+            1.0 if any(
+                target.lower() in str(cuisine_series.iloc[i]).lower()
+                for target in intent["desired_cuisines"]
+            ) else 0.0
             for i in range(len(df))
         ])
     cuisine_query_present = len(intent["desired_cuisines"]) > 0
@@ -716,7 +750,14 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
     if intent["has_location"]:
         relevance_gate = relevance_gate & (location_match >= 1.0)
     if cuisine_query_present and not intent["has_location"]:
-        relevance_gate = relevance_gate & (cuisine_boost >= 1.0)
+        # Gate on the cuisine *field* (not description text) to prevent restaurants
+        # that merely mention a cuisine in their summary from slipping through.
+        # High semantic similarity is an escape hatch for correctly typed but
+        # unorthodoxly-tagged restaurants (e.g., a Japanese place that specialises
+        # in oysters will score high semantically even without "Seafood" as cuisine).
+        relevance_gate = relevance_gate & (
+            (cuisine_field_boost >= 1.0) | (semantic_norm >= 0.65)
+        )
 
     if intent["has_location"] and cuisine_query_present:
         filtered_scores = np.where(
@@ -727,7 +768,8 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
         cuisine_location_gate = (
             (location_match >= 1.0)
             & (
-                (cuisine_boost >= 1.0)
+                (cuisine_field_boost >= 1.0)
+                | (cuisine_boost >= 1.0)
                 | ((semantic_norm >= 0.62) & (strong_text_signal >= 0.45))
             )
         )
