@@ -10,11 +10,15 @@ The repository is set up to run locally without API keys or live downloads. The 
 
 ---
 
-## Author
+## Authors
 
 | Name | GitHub |
 |---|---|
 | Hollan Yuan | [hwyuanzi](https://github.com/hwyuanzi) |
+| Ryan Han | [PapTR](https://github.com/PapTR) |
+| Rahul Adusumalli | [Rahuman-Noodles](https://github.com/Rahuman-Noodles) |
+| Muqiao Tao | [taomuqiao](https://github.com/taomuqiao) |
+| Jaiden Xu | [jbx202](https://github.com/jbx202) |
 
 ---
 
