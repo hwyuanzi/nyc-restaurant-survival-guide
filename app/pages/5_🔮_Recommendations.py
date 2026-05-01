@@ -163,7 +163,7 @@ with st.sidebar:
 
     search_query = st.text_input(
         "Search restaurants",
-        placeholder="Type a name, cuisine, borough, or address",
+        placeholder="Type a name or cuisine",
         key="recommendations_liked_restaurant_search",
     ).strip().lower()
     search_filter_col1, search_filter_col2 = st.columns(2)
@@ -189,8 +189,6 @@ with st.sidebar:
         search_mask = (
             search_df["name"].fillna("").str.lower().str.contains(search_query, regex=False)
             | search_df["cuisine_type"].fillna("").str.lower().str.contains(search_query, regex=False)
-            | search_df["boro"].fillna("").str.lower().str.contains(search_query, regex=False)
-            | search_df["address"].fillna("").str.lower().str.contains(search_query, regex=False)
         )
         search_df = search_df[search_mask]
 
