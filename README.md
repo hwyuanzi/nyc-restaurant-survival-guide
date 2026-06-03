@@ -1,8 +1,8 @@
 # NYC Restaurant Survival Guide
 
-New York University, Spring 2026
-
-Professor Kyunghyun Cho (https://github.com/kyunghyuncho)
+**Course:** New York University, Spring 2026  
+**Advisor:** Professor [Kyunghyun Cho](https://github.com/kyunghyuncho)  
+**Project Lead & Maintainer:** [Hollan Yuan](https://github.com/hwyuanzi)
 
 NYC Restaurant Survival Guide is a Streamlit machine-learning app for exploring New York City restaurants. It combines real NYC Department of Health and Mental Hygiene inspection data, cached Google Places metadata, semantic search, a health-grade risk classifier, K-Means clustering from scratch, PCA-based cluster visualization, and personalized recommendations from saved liked restaurants.
 
