@@ -12,6 +12,7 @@ import time
 import json
 import hashlib
 import re
+from dataclasses import dataclass
 import joblib
 import numpy as np
 import pandas as pd
@@ -334,234 +335,263 @@ def _cuisine_persona(cuisine_counts, top_n=3):
     # Broadly mixed — no single cuisine carries the cluster
     return "Mixed Cuisine", top_list, True
 
+@dataclass
+class _ClusterGlobals:
+    """Citywide baselines a cluster is judged "distinctive" against."""
+
+    rating: float
+    price: float
+    reviews_med: float
+    health: float
+
+
+def _cluster_descriptive_stats(cluster_df: pd.DataFrame) -> dict:
+    """Stage 1: raw per-cluster aggregates plus cuisine/borough mixes.
+
+    Pure summarisation — no labelling or narrative logic lives here.
+    """
+    avg_rating = pd.to_numeric(cluster_df["avg_rating"], errors="coerce").mean()
+    avg_price = pd.to_numeric(cluster_df["price_tier"], errors="coerce").mean()
+    review_med = pd.to_numeric(cluster_df["review_count"], errors="coerce").median()
+    avg_health = pd.to_numeric(
+        cluster_df.get("score", pd.Series(np.nan, index=cluster_df.index)),
+        errors="coerce",
+    ).mean()
+
+    # Cuisine mix (mapped to groups for clustering-consistent labeling).
+    cuisine_raw = (
+        cluster_df["cuisine_type"].fillna("").astype(str).str.strip().replace({"0": ""})
+    )
+    cuisine_grouped = cuisine_raw.map(lambda x: CUISINE_GROUP_MAP.get(x, "Other") if x else "")
+    cuisine_counts = cuisine_grouped[cuisine_grouped != ""].value_counts(normalize=True)
+    cuisine_persona, top_cuisines, cuisine_is_mixed = _cuisine_persona(cuisine_counts, top_n=3)
+
+    # Borough concentration.
+    boro_counts = (
+        cluster_df["boro"].fillna("Unknown")
+        .astype(str).str.strip()
+        .replace({"0": "Unknown"})
+        .value_counts(normalize=True)
+    )
+    top_boro = boro_counts.index[0] if not boro_counts.empty else "Unknown"
+    top_boro_share = float(boro_counts.iloc[0]) if not boro_counts.empty else 0.0
+    geographic = _geographic_persona(top_boro_share, top_boro)
+
+    if top_cuisines:
+        cuisine_blurb = ", ".join(f"{name} {share * 100:.0f}%" for name, share in top_cuisines)
+    else:
+        cuisine_blurb = "mixed"
+
+    boro_blurb_parts = [
+        f"{name} {share * 100:.0f}%" for name, share in boro_counts.head(2).items()
+        if name not in ("Unknown", "")
+    ]
+    boro_blurb = ", ".join(boro_blurb_parts) if boro_blurb_parts else "spread across NYC"
+
+    return {
+        "avg_rating": avg_rating,
+        "avg_price": avg_price,
+        "review_med": review_med,
+        "avg_health": avg_health,
+        "cuisine_persona": cuisine_persona,
+        "top_cuisines": top_cuisines,
+        "cuisine_is_mixed": cuisine_is_mixed,
+        "geographic": geographic,
+        "top_boro_share": top_boro_share,
+        "cuisine_blurb": cuisine_blurb,
+        "boro_blurb": boro_blurb,
+        "boro_blurb_parts": boro_blurb_parts,
+    }
+
+
+def _cluster_label_parts(stats: dict, g: _ClusterGlobals) -> list[str]:
+    """Stage 2: ordered persona fragments that compose the cluster label.
+
+    "Mixed Cuisine" is never a label — when cuisine is mixed, geography then
+    price then rating becomes the primary signal instead.
+    """
+    avg_price = stats["avg_price"]
+    avg_rating = stats["avg_rating"]
+    geographic = stats["geographic"]
+
+    price_label = _price_persona(avg_price)
+    rating_label = _rating_persona(avg_rating, stats["review_med"])
+    price_delta = (avg_price or g.price) - g.price
+    rating_delta = (avg_rating or g.rating) - g.rating
+    label_parts: list[str] = []
+
+    if not stats["cuisine_is_mixed"]:
+        label_parts.append(stats["cuisine_persona"])
+        if geographic:
+            label_parts.append(geographic)
+        elif price_label and abs(price_delta) >= 0.20:
+            label_parts.append(price_label)
+        elif rating_label and abs(rating_delta) >= 0.15:
+            label_parts.append(rating_label)
+    else:
+        if geographic:
+            label_parts.append(geographic)
+        if price_label and abs(price_delta) >= 0.20:
+            label_parts.append(price_label)
+        elif rating_label and abs(rating_delta) >= 0.15:
+            label_parts.append(rating_label)
+        if len(label_parts) < 2 and price_label and price_label not in label_parts:
+            label_parts.append(price_label)
+        if len(label_parts) < 2 and rating_label and rating_label not in label_parts:
+            label_parts.append(rating_label)
+        if not label_parts:
+            label_parts = ["Neighborhood Mix"]
+
+    return label_parts
+
+
+def _dedupe_cluster_label(label: str, stats: dict, cluster_size: int,
+                          used_labels: set[str]) -> str:
+    """Stage 2b: keep labels unique across clusters with similar summaries."""
+    if label in used_labels:
+        top_cuisines = stats["top_cuisines"]
+        if top_cuisines:
+            distinct_cuisines = [
+                name for name, _ in top_cuisines[:2]
+                if name.lower() not in label.lower()
+            ]
+            if distinct_cuisines:
+                label = f"{label} · {distinct_cuisines[0]} Mix"
+        if label in used_labels:
+            label = f"{label} ({cluster_size})"
+    return label
+
+
+def _cluster_story(stats: dict, g: _ClusterGlobals) -> str:
+    """Stage 3: human-readable narrative justifying the persona with numbers."""
+    avg_price = stats["avg_price"]
+    avg_rating = stats["avg_rating"]
+    avg_health = stats["avg_health"]
+    geographic = stats["geographic"]
+    top_cuisines = stats["top_cuisines"]
+    story_parts: list[str] = []
+
+    if stats["cuisine_is_mixed"] and len(top_cuisines) >= 2:
+        story_parts.append(
+            f"A **mixed-cuisine** cluster: the three most common cuisines are "
+            f"{stats['cuisine_blurb']} — no single cuisine carries more than "
+            f"{top_cuisines[0][1] * 100:.0f}% of the cluster, so these restaurants "
+            f"are grouped by shared **price, rating, and location** signals rather "
+            f"than cuisine."
+        )
+    elif top_cuisines:
+        main_cuisine, main_share = top_cuisines[0]
+        story_parts.append(
+            f"A **{main_cuisine}-led** cluster — {main_share * 100:.0f}% of "
+            f"restaurants here serve {main_cuisine}."
+        )
+
+    if geographic:
+        story_parts.append(
+            f"Geographically concentrated in **{geographic}** "
+            f"({stats['top_boro_share'] * 100:.0f}% of the cluster)."
+        )
+    elif stats["boro_blurb_parts"]:
+        story_parts.append(f"Borough mix: {stats['boro_blurb']}.")
+
+    price_dir = ""
+    if not pd.isna(avg_price):
+        if avg_price > g.price + 0.2:
+            price_dir = "above-average prices"
+        elif avg_price < g.price - 0.2:
+            price_dir = "below-average prices"
+    rating_dir = ""
+    if not pd.isna(avg_rating):
+        if avg_rating > g.rating + 0.15:
+            rating_dir = "higher-than-average ratings"
+        elif avg_rating < g.rating - 0.15:
+            rating_dir = "lower-than-average ratings"
+
+    signal_bits = [bit for bit in (price_dir, rating_dir) if bit]
+    if signal_bits:
+        story_parts.append(
+            f"These restaurants show {' and '.join(signal_bits)} "
+            f"(avg rating {avg_rating:.2f}, avg price tier {avg_price:.2f} vs "
+            f"city averages {g.rating:.2f} / {g.price:.2f})."
+        )
+    else:
+        story_parts.append(
+            f"Operating near NYC averages on price and rating "
+            f"(avg rating {avg_rating:.2f}, avg price tier {avg_price:.2f})."
+        )
+
+    if not pd.isna(avg_health) and not pd.isna(g.health):
+        if avg_health > g.health + 3:
+            story_parts.append(
+                f"Slightly **higher DOHMH inspection scores** (avg "
+                f"{avg_health:.1f}, worse than the citywide "
+                f"{g.health:.1f}) — worth checking individual grades."
+            )
+        elif avg_health < g.health - 3:
+            story_parts.append(
+                f"**Cleaner on health inspections** (avg score "
+                f"{avg_health:.1f} vs city {g.health:.1f}, lower = better)."
+            )
+
+    return " ".join(story_parts)
+
+
 def _build_cluster_profiles(df: pd.DataFrame) -> pd.DataFrame:
     """Generate persona labels + narrative stories per cluster.
- 
+
+    Orchestrates four small stages per cluster: descriptive stats, label
+    construction, label de-duplication, and narrative story.
+
     Output columns (unchanged so the rest of the app still works):
         cluster_id, cluster_label, cluster_key_drivers, cluster_story
     Extra columns added for richer UI (safe to ignore in older callers):
         cluster_persona, cluster_cuisine_mix, cluster_boro_mix
     """
-    # Import here to avoid a circular import with build_feature_matrix.
-    from utils.clustering import build_feature_matrix  # type: ignore
- 
     if df.empty:
         return pd.DataFrame(columns=[
             "cluster_id", "cluster_label", "cluster_key_drivers", "cluster_story",
             "cluster_persona", "cluster_cuisine_mix", "cluster_boro_mix",
         ])
- 
-    feature_matrix, feature_columns, aligned_df = build_feature_matrix(df)
-    feature_df = pd.DataFrame(feature_matrix, columns=feature_columns,
-                              index=aligned_df.index)
- 
-    # Global baselines — a cluster is "distinctive" relative to these.
-    global_rating = pd.to_numeric(df["avg_rating"], errors="coerce").mean()
-    global_price = pd.to_numeric(df["price_tier"], errors="coerce").mean()
-    global_reviews_med = pd.to_numeric(df["review_count"], errors="coerce").median()
-    global_health = pd.to_numeric(df.get("score", pd.Series(np.nan)),
-                                  errors="coerce").mean()
- 
+
+    g = _ClusterGlobals(
+        rating=pd.to_numeric(df["avg_rating"], errors="coerce").mean(),
+        price=pd.to_numeric(df["price_tier"], errors="coerce").mean(),
+        reviews_med=pd.to_numeric(df["review_count"], errors="coerce").median(),
+        health=pd.to_numeric(df.get("score", pd.Series(np.nan)), errors="coerce").mean(),
+    )
+
     profile_rows = []
     used_labels: set[str] = set()
- 
+
     for cluster_id in sorted(df["cluster_id"].unique()):
         cluster_df = df[df["cluster_id"] == cluster_id]
-        n = len(cluster_df)
-        if n == 0:
+        if cluster_df.empty:
             continue
- 
-        # ---- Raw statistics ----
-        avg_rating = pd.to_numeric(cluster_df["avg_rating"],
-                                   errors="coerce").mean()
-        avg_price = pd.to_numeric(cluster_df["price_tier"],
-                                  errors="coerce").mean()
-        review_med = pd.to_numeric(cluster_df["review_count"],
-                                   errors="coerce").median()
-        avg_health = pd.to_numeric(cluster_df.get("score", pd.Series(np.nan,
-                                   index=cluster_df.index)), errors="coerce").mean()
- 
-        # ---- Cuisine mix (mapped to groups for clustering-consistent labeling) ----
-        cuisine_raw = (
-            cluster_df["cuisine_type"].fillna("").astype(str).str.strip().replace({"0": ""})
-        )
-        cuisine_grouped = cuisine_raw.map(lambda x: CUISINE_GROUP_MAP.get(x, "Other") if x else "")
-        cuisine_counts = (
-            cuisine_grouped[cuisine_grouped != ""].value_counts(normalize=True)
-        )
-        cuisine_persona, top_cuisines, cuisine_is_mixed = _cuisine_persona(
-            cuisine_counts, top_n=3,
-        )
- 
-        # ---- Borough concentration ----
-        boro_counts = (
-            cluster_df["boro"].fillna("Unknown")
-            .astype(str).str.strip()
-            .replace({"0": "Unknown"})
-            .value_counts(normalize=True)
-        )
-        top_boro = boro_counts.index[0] if not boro_counts.empty else "Unknown"
-        top_boro_share = float(boro_counts.iloc[0]) if not boro_counts.empty else 0.0
-        geographic = _geographic_persona(top_boro_share, top_boro)
- 
-        # ---- Persona qualifiers ----
-        price_label = _price_persona(avg_price)
-        rating_label = _rating_persona(avg_rating, review_med)
- 
-        # ---- Assemble the label ----
-        # Priority: lead with what MOST distinguishes this cluster.
-        # "Mixed Cuisine" is never used as a label — when cuisine is mixed,
-        # geography → price → rating becomes the primary signal instead.
-        price_delta  = (avg_price  or global_price)  - global_price
-        rating_delta = (avg_rating or global_rating) - global_rating
-        label_parts: list[str] = []
 
-        if not cuisine_is_mixed:
-            # Cuisine-defined cluster: cuisine is the primary identifier
-            label_parts.append(cuisine_persona)
-            if geographic:
-                label_parts.append(geographic)
-            elif price_label and abs(price_delta) >= 0.20:
-                label_parts.append(price_label)
-            elif rating_label and abs(rating_delta) >= 0.15:
-                label_parts.append(rating_label)
-        else:
-            # Geography / price / quality defines this cluster.
-            if geographic:
-                label_parts.append(geographic)
-            if price_label and abs(price_delta) >= 0.20:
-                label_parts.append(price_label)
-            elif rating_label and abs(rating_delta) >= 0.15:
-                label_parts.append(rating_label)
-            # Always aim for ≥ 2 parts — add price first, then rating as second
-            if len(label_parts) < 2 and price_label and price_label not in label_parts:
-                label_parts.append(price_label)
-            if len(label_parts) < 2 and rating_label and rating_label not in label_parts:
-                label_parts.append(rating_label)
-            if not label_parts:
-                label_parts = ["Neighborhood Mix"]
+        stats = _cluster_descriptive_stats(cluster_df)
 
+        label_parts = _cluster_label_parts(stats, g)
         label = " · ".join(label_parts[:3])
- 
-        # De-dupe clashing labels across clusters (happens when two clusters
-        # look similar on our low-dimensional persona summary).
-        if label in used_labels:
-            if top_cuisines:
-                distinct_cuisines = [
-                    name for name, _ in top_cuisines[:2]
-                    if name.lower() not in label.lower()
-                ]
-                if distinct_cuisines:
-                    label = f"{label} · {distinct_cuisines[0]} Mix"
-            if label in used_labels:
-                label = f"{label} ({len(cluster_df)})"
+        label = _dedupe_cluster_label(label, stats, len(cluster_df), used_labels)
         used_labels.add(label)
- 
-        # ---- Build a cuisine mix blurb ----
-        if top_cuisines:
-            cuisine_blurb = ", ".join(
-                f"{name} {share * 100:.0f}%" for name, share in top_cuisines
-            )
-        else:
-            cuisine_blurb = "mixed"
- 
-        # ---- Build a borough mix blurb ----
-        top_boros = boro_counts.head(2)
-        boro_blurb_parts = [
-            f"{name} {share * 100:.0f}%" for name, share in top_boros.items()
-            if name not in ("Unknown", "")
-        ]
-        boro_blurb = ", ".join(boro_blurb_parts) if boro_blurb_parts else "spread across NYC"
- 
-        # ---- Narrative story ----
-        # Lead with the persona, then justify with numbers.
-        story_parts: list[str] = []
- 
-        if cuisine_is_mixed and len(top_cuisines) >= 2:
-            story_parts.append(
-                f"A **mixed-cuisine** cluster: the three most common cuisines are "
-                f"{cuisine_blurb} — no single cuisine carries more than "
-                f"{top_cuisines[0][1] * 100:.0f}% of the cluster, so these restaurants "
-                f"are grouped by shared **price, rating, and location** signals rather "
-                f"than cuisine."
-            )
-        else:
-            if top_cuisines:
-                main_cuisine, main_share = top_cuisines[0]
-                story_parts.append(
-                    f"A **{main_cuisine}-led** cluster — {main_share * 100:.0f}% of "
-                    f"restaurants here serve {main_cuisine}."
-                )
- 
-        # Geography
-        if geographic:
-            story_parts.append(
-                f"Geographically concentrated in **{geographic}** "
-                f"({top_boro_share * 100:.0f}% of the cluster)."
-            )
-        elif boro_blurb_parts:
-            story_parts.append(f"Borough mix: {boro_blurb}.")
- 
-        # Price + rating signal with direction
-        price_dir = ""
-        if not pd.isna(avg_price):
-            if avg_price > global_price + 0.2:
-                price_dir = "above-average prices"
-            elif avg_price < global_price - 0.2:
-                price_dir = "below-average prices"
-        rating_dir = ""
-        if not pd.isna(avg_rating):
-            if avg_rating > global_rating + 0.15:
-                rating_dir = "higher-than-average ratings"
-            elif avg_rating < global_rating - 0.15:
-                rating_dir = "lower-than-average ratings"
- 
-        signal_bits = [bit for bit in (price_dir, rating_dir) if bit]
-        if signal_bits:
-            story_parts.append(
-                f"These restaurants show {' and '.join(signal_bits)} "
-                f"(avg rating {avg_rating:.2f}, avg price tier {avg_price:.2f} vs "
-                f"city averages {global_rating:.2f} / {global_price:.2f})."
-            )
-        else:
-            story_parts.append(
-                f"Operating near NYC averages on price and rating "
-                f"(avg rating {avg_rating:.2f}, avg price tier {avg_price:.2f})."
-            )
- 
-        # Health context (only if meaningfully different or of interest)
-        if not pd.isna(avg_health) and not pd.isna(global_health):
-            if avg_health > global_health + 3:
-                story_parts.append(
-                    f"Slightly **higher DOHMH inspection scores** (avg "
-                    f"{avg_health:.1f}, worse than the citywide "
-                    f"{global_health:.1f}) — worth checking individual grades."
-                )
-            elif avg_health < global_health - 3:
-                story_parts.append(
-                    f"**Cleaner on health inspections** (avg score "
-                    f"{avg_health:.1f} vs city {global_health:.1f}, lower = better)."
-                )
- 
-        story = " ".join(story_parts)
- 
-        # ---- Key drivers — short enough for a chip, derived from persona pieces ----
+
+        story = _cluster_story(stats, g)
+
         drivers = [p for p in label_parts if not re.match(r"^Cluster\s*\d+$", p)]
         if not drivers:
             drivers = ["Balanced mix"]
         key_drivers = " | ".join(drivers[:3])
- 
+
         profile_rows.append({
             "cluster_id": cluster_id,
             "cluster_label": label,
             "cluster_key_drivers": key_drivers,
             "cluster_story": story,
-            # Extras for UI use:
-            "cluster_persona": cuisine_persona,
-            "cluster_cuisine_mix": cuisine_blurb,
-            "cluster_boro_mix": boro_blurb,
+            "cluster_persona": stats["cuisine_persona"],
+            "cluster_cuisine_mix": stats["cuisine_blurb"],
+            "cluster_boro_mix": stats["boro_blurb"],
         })
- 
+
     return pd.DataFrame(profile_rows)
  
 

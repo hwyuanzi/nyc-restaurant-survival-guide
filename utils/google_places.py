@@ -1,3 +1,4 @@
+import os
 import time
 from pathlib import Path
 
@@ -5,15 +6,14 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from utils.search import neighborhood_from_zipcode
-
+# Legacy Places API (used only when rebuilding the Google enrichment cache).
 PLACES_SEARCH = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 PLACES_DETAILS = "https://maps.googleapis.com/maps/api/place/details/json"
 PLACES_PHOTO = "https://maps.googleapis.com/maps/api/place/photo"
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 ENRICHED_CACHE_DIR = DATA_DIR / "cache"
-import os
+
 
 def get_google_api_key():
     try:
@@ -34,6 +34,7 @@ def _cache_path(sample_size):
 
 
 def build_photo_url(photo_ref, api_key, max_width=400):
+    """Legacy Place Photo URL. Not compatible with Places API (New)-only projects."""
     return f"{PLACES_PHOTO}?maxwidth={max_width}&photo_reference={photo_ref}&key={api_key}"
 
 
@@ -97,6 +98,8 @@ def enrich_with_google(nyc_df, sample_size, api_key):
     if nyc_df.empty or not api_key:
         return pd.DataFrame()
 
+    from utils.search import neighborhood_from_zipcode
+
     prioritized = nyc_df.copy()
     prioritized["zipcode_norm"] = prioritized.get("zipcode", pd.Series([""] * len(prioritized), index=prioritized.index)).fillna("").astype(str).str[:5]
     prioritized["neighborhood"] = prioritized["zipcode_norm"].apply(neighborhood_from_zipcode)
@@ -158,3 +161,17 @@ def get_enriched_restaurants(nyc_df, sample_size, api_key, force_refresh=False):
     if not enriched_df.empty:
         enriched_df.to_pickle(cache_file)
     return enriched_df
+
+
+# Re-export for backward compatibility (import from utils.place_photos in UI code).
+from utils.place_photos import fetch_place_photo_bytes, get_restaurant_photo_bytes  # noqa: E402
+
+__all__ = [
+    "build_photo_url",
+    "fetch_place_photo_bytes",
+    "get_restaurant_photo_bytes",
+    "get_google_api_key",
+    "get_enriched_restaurants",
+    "fetch_google_place",
+    "enrich_with_google",
+]

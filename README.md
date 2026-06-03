@@ -1,26 +1,12 @@
 # NYC Restaurant Survival Guide
 
-**CSCI-UA 473 - Fundamentals of Machine Learning**
-
 New York University, Spring 2026
+
+Professor Kyunghyun Cho (https://github.com/kyunghyuncho)
 
 NYC Restaurant Survival Guide is a Streamlit machine-learning app for exploring New York City restaurants. It combines real NYC Department of Health and Mental Hygiene inspection data, cached Google Places metadata, semantic search, a health-grade risk classifier, K-Means clustering from scratch, PCA-based cluster visualization, and personalized recommendations from saved liked restaurants.
 
-The repository is set up to run locally without live downloads. The prepared restaurant table, embedding matrix, classifier checkpoint, and clustering caches are committed so the demo can start from the submitted files. Restaurant photos use the Google Places Photo API and only display when you provide a local `GOOGLE_API_KEY`.
-
----
-
-## Authors
-
-| Name | GitHub |
-|---|---|
-| Hollan Yuan | [hwyuanzi](https://github.com/hwyuanzi) |
-| Ryan Han | [PapTR](https://github.com/PapTR) |
-| Rahul Adusumalli | [Rahuman-Noodles](https://github.com/Rahuman-Noodles) |
-| Muqiao Tao | [taomuqiao](https://github.com/taomuqiao) |
-| Jaiden Xu | [jbx202](https://github.com/jbx202) |
-
----
+The repository is set up to run locally without live downloads. The prepared restaurant table, embedding matrix, classifier checkpoint, and clustering caches are committed so the demo can start from the submitted files. Restaurant photos are optional and use Places API (New) at runtime when you provide a local `GOOGLE_API_KEY`.
 
 ## Project Checklist
 
@@ -31,7 +17,8 @@ The repository is set up to run locally without live downloads. The prepared res
 | Course algorithm implementation | `models/kmeans_scratch.py` implements K-Means++ directly in NumPy, including initialization, assignment, centroid updates, empty-cluster handling, convergence, and multi-start model selection. |
 | ML coherence | Semantic retrieval, health-grade classification, clustering, PCA visualization, K selection, and recommendation reranking all operate on documented data representations. |
 | Usability | Pages include labeled controls, constrained filters, cached runtime assets, error messages for missing data, and a login/profile flow for saving likes. |
-| Repository hygiene | Active code is under `app/`, `models/`, `utils/`, `data/`, and `tests/`. Obsolete checkpoint-only modules and old cache files have been removed. |
+| Repository hygiene | Active code is under `app/`, `models/`, `utils/`, `data/`, and `tests/`. Obsolete checkpoint-only modules and old cache files have been removed. The largest orchestration functions (`semantic_search`, `_build_cluster_profiles`) are factored into small, single-responsibility stages for easier review. |
+| Evaluation integrity | Health-classifier preprocessing is fit on the training split only, with an explicit `fit`/`transform` preprocessor, a persisted fitted object, and a regression test guarding against leakage. |
 
 ---
 
@@ -58,7 +45,7 @@ pip install -r requirements.txt
 ### 3. Start The App
 
 ```bash
-streamlit run app/Main.py
+.venv/bin/streamlit run app/Main.py
 ```
 
 Open the local URL shown by Streamlit, usually:
@@ -69,7 +56,9 @@ http://localhost:8501
 
 ### 4. Optional: Enable Restaurant Photos
 
-Search results still work without a Google key, but restaurant photos require the Google Places Photo API. Add a key in one of these two ways:
+Search results still work without a Google key, but restaurant photos are loaded at runtime through **Places API (New)** using each restaurant's committed `g_place_id`. On Google Cloud, enable **Places API (New)** for the project that owns your key. The UI does not use the legacy Place Photo URL.
+
+Add a key in one of these two ways:
 
 ```bash
 cp .streamlit/secrets.toml.example .streamlit/secrets.toml
@@ -85,10 +74,10 @@ Or set the key as an environment variable before starting Streamlit:
 
 ```bash
 export GOOGLE_API_KEY="your_google_api_key_here"
-streamlit run app/Main.py
+.venv/bin/streamlit run app/Main.py
 ```
 
-The real `.streamlit/secrets.toml` file is intentionally ignored by Git.
+The real `.streamlit/secrets.toml` file is intentionally ignored by Git and must never be committed. If photos do not appear after adding a key, confirm that Places API (New) is enabled, billing is active, and the key's application/API restrictions allow local development.
 
 ### 5. Optional Pipenv Workflow
 
@@ -135,23 +124,37 @@ The classifier data comes from NYC OpenData's DOHMH restaurant inspection datase
 https://data.cityofnewyork.us/resource/43nn-pn8j.csv
 ```
 
-`data/preprocess.py` aggregates raw inspection-violation rows into one row per restaurant, keeps the latest grade as the label, engineers features, and writes:
+`data/preprocess.py` aggregates raw inspection-violation rows into one row per restaurant, keeps the latest grade as the label, splits the rows into train/test **before** any statistic is learned, fits all preprocessing on the training split only, and writes:
 
 | File | Shape | Purpose |
 |---|---:|---|
-| `data/train.csv` | `11,401 x 26` | Classifier training rows and target |
-| `data/test.csv` | `2,851 x 26` | Held-out classifier test rows and target |
-| `data/meta_train.csv` | `11,401 x 8` | Restaurant metadata for train rows |
-| `data/meta_test.csv` | `2,851 x 8` | Restaurant metadata for held-out UI selection |
-| `data/feature_config.json` | config | Feature names, label mapping, scaler statistics |
+| `data/train.csv` | `19,366 x 26` | Classifier training rows and target |
+| `data/test.csv` | `4,842 x 26` | Held-out classifier test rows and target |
+| `data/meta_train.csv` | `19,366 x 8` | Restaurant metadata for train rows |
+| `data/meta_test.csv` | `4,842 x 8` | Restaurant metadata for held-out UI selection |
+| `data/feature_config.json` | config | Feature names, label mapping, train-only imputation/scaler statistics |
+| `data/cache/health_preprocessor.joblib` | object | Fitted, train-only `HealthFeaturePreprocessor` (replayed at test/inference time) |
+
+(Exact row counts depend on how many raw rows you download; the committed splits are built from 200,000 raw inspection rows, which aggregate to 24,208 unique graded restaurants.)
 
 The health classifier uses 25 input features:
 
 - `num_inspections`, `num_violations`, `violations_per_inspection`
 - borough one-hot features
-- top cuisine one-hot features plus `cuisine_Other`
+- top-15 cuisine one-hot features plus `cuisine_Other`
 
 Score-derived columns such as `latest_score`, `avg_score`, `max_score`, and `critical_ratio` are intentionally excluded because DOHMH grades are derived from inspection score thresholds. Keeping them would leak the label.
+
+### Leakage-Safe Preprocessing (Train-Only Fit/Transform)
+
+Every preprocessing decision that *learns* something from data is treated as part of the model and is fit on the training split only:
+
+1. **Split first.** `preprocess_dohmh()` aggregates to one row per restaurant, then calls `train_test_split` on the *raw* aggregated rows (stratified on grade, `random_state=42`).
+2. **Fit on train only.** `HealthFeaturePreprocessor.fit(train_rows)` learns the median imputation values, the `StandardScaler` mean/scale, the top-15 cuisine vocabulary, and the one-hot column schema — all from the training rows alone.
+3. **Replay on test/inference.** `transform()` applies those fixed statistics to the held-out test rows (and to single live rows in the app) without ever recomputing them. Cuisines unseen in training collapse into `cuisine_Other`; boroughs unseen in training produce an all-zero borough sub-vector.
+4. **Persist the fitted object.** The preprocessor is saved to `data/cache/health_preprocessor.joblib`, and its learned statistics are mirrored into `feature_config.json` (`numerical_medians`, `scaler_mean`, `scaler_scale`, `boro_categories`, `cuisine_categories`, and `fit_on: "train_split_only"`).
+
+This prevents the earlier behavior where imputation medians, scaling statistics, and the cuisine vocabulary were computed on the full dataset before splitting, which let the held-out test distribution leak into the training-time representation. The regression test `tests/test_preprocess_leakage.py` asserts these statistics come from the training rows only.
 
 ### Prepared Search And Demo Cache
 
@@ -165,6 +168,7 @@ These files are intentionally committed for a reliable local demo:
 | `data/cache/health_classifier.pt` | checkpoint | Trained PyTorch classifier weights |
 | `data/cache/health_classifier_history.json` | history | Training and validation loss/F1 history |
 | `data/cache/health_classifier_importance.json` | importance | Cached permutation-importance output |
+| `data/cache/health_preprocessor.joblib` | object | Fitted train-only preprocessor (imputation, scaler, cuisine vocab, schema) |
 | `data/cluster_cache.parquet` | `2,835 x 48` | K-Means clustered restaurant table |
 | `data/kmeans_model.joblib` | model cache | K-Means model, scaler, and PCA artifacts |
 | `data/cluster_cache_gmm.parquet` | `2,835 x 48` | GMM baseline clustered table |
@@ -205,6 +209,7 @@ Implemented in `utils/search.py` and used by `app/Main.py` plus `app/pages/1_�
 - Query and restaurant vectors are L2-normalized, so cosine similarity is computed as a dot product.
 - Structured guardrails for cuisine, borough/neighborhood, price, and quality keep explicit user intent from being overwhelmed by generic semantic matches.
 - If the embedding model is unavailable, the search code falls back to lexical and structured scoring instead of crashing.
+- `semantic_search` is organized into reviewable stages — query expansion, semantic similarity, signal components, hard filters, signal blending, the price-intent cascade, relevance gating, and final ranking — each in its own helper function.
 
 ### Health Grade Risk Classifier
 
@@ -220,17 +225,19 @@ Input(25)
 Training details:
 
 - PyTorch model and training loop implemented directly with `torch.nn`, `DataLoader`, AdamW, and class-weighted cross entropy.
+- All preprocessing statistics are fit on the training split only (see "Leakage-Safe Preprocessing" above), so the held-out metrics reflect a clean train/test protocol.
 - Stratified validation split is taken from the training data.
 - Early stopping monitors validation weighted F1.
 - The page reports held-out accuracy/F1, majority baseline, confusion matrix, per-class metrics, permutation importance, local sensitivity, and path-to-A feature edits.
+- The committed checkpoint can be regenerated deterministically from a terminal with `python -m models.train_health_classifier`, which mirrors the exact recipe the Streamlit page uses and prints the held-out metrics below.
 
-Current held-out metrics from the committed checkpoint:
+Current held-out metrics from the committed checkpoint (train-only preprocessing, `4,842` held-out restaurants):
 
 | Metric | Value |
 |---|---:|
-| Accuracy | `70.4%` |
-| Weighted F1 | `0.708` |
-| Macro F1 | `0.394` |
+| Accuracy | `76.4%` |
+| Weighted F1 | `0.804` |
+| Macro F1 | `0.508` |
 
 The classifier is presented as an inspection-risk signal, not an official future-grade forecast.
 
@@ -321,15 +328,18 @@ nyc-restaurant-survival-guide/
 │       ├── enriched_restaurants_3800.pkl
 │       ├── health_classifier.pt
 │       ├── health_classifier_history.json
-│       └── health_classifier_importance.json
+│       ├── health_classifier_importance.json
+│       └── health_preprocessor.joblib
 ├── models/
 │   ├── __init__.py
 │   ├── custom_mlp.py
-│   └── kmeans_scratch.py
+│   ├── kmeans_scratch.py
+│   └── train_health_classifier.py
 ├── tests/
 │   ├── __init__.py
 │   ├── test_custom_mlp.py
 │   ├── test_kmeans_scratch.py
+│   ├── test_preprocess_leakage.py
 │   ├── test_recommendations.py
 │   └── test_semantic_search.py
 ├── utils/
@@ -338,6 +348,7 @@ nyc-restaurant-survival-guide/
 │   ├── clustering.py
 │   ├── data.py
 │   ├── google_places.py
+│   ├── place_photos.py
 │   ├── search.py
 │   ├── search_assets.py
 │   └── user_profile.py
@@ -358,11 +369,19 @@ The submitted app does not expose a Streamlit "refresh data" button. Rebuilding 
 
 ```bash
 source .venv/bin/activate
-python data/download_data.py 50000
+python data/download_data.py 200000
 python data/preprocess.py
 ```
 
-This rewrites `data/train.csv`, `data/test.csv`, `data/meta_train.csv`, `data/meta_test.csv`, and `data/feature_config.json`. If the classifier checkpoint is deleted, the Health Grade Risk Classifier page can retrain and save a new `data/cache/health_classifier.pt` from those files.
+This rewrites `data/train.csv`, `data/test.csv`, `data/meta_train.csv`, `data/meta_test.csv`, `data/feature_config.json`, and the fitted `data/cache/health_preprocessor.joblib`. Preprocessing splits the rows first and then fits all imputation/scaling/vocabulary statistics on the training split only, so the regenerated test rows stay genuinely held out. You can pass a smaller number (e.g. `50000`) for a lighter rebuild; the documented committed splits use `200000` raw rows.
+
+To regenerate the committed classifier checkpoint and print fresh held-out metrics, run:
+
+```bash
+python -m models.train_health_classifier
+```
+
+This rewrites `data/cache/health_classifier.pt` and `data/cache/health_classifier_history.json`, and removes the stale `data/cache/health_classifier_importance.json` so the app recomputes it lazily. If the checkpoint is simply deleted, the Health Grade Risk Classifier page will also retrain and save a new one from the prepared files on next load.
 
 ### Rebuild Google-Enriched Search Cache
 
@@ -388,6 +407,8 @@ Then run:
 python -c "from utils.search_assets import load_prepared_search_assets, DEFAULT_SEARCH_SAMPLE_SIZE; load_prepared_search_assets(DEFAULT_SEARCH_SAMPLE_SIZE, force_refresh=True)"
 ```
 
+The committed cache is enough for the submitted demo. Rebuilding the Google-enriched cache may require enabling the legacy Places Text Search/Details endpoints because the enrichment pipeline was originally built against those endpoints. Runtime photo display is separate and uses Places API (New) through `utils/place_photos.py`.
+
 To try a larger local prepared cache, edit `DEFAULT_SEARCH_SAMPLE_SIZE` in `utils/search_assets.py` or call `load_prepared_search_assets(sample_size=YOUR_SIZE, force_refresh=True)`. Larger samples improve coverage but require more Google API calls, more embedding time, and larger cache files.
 
 ---
@@ -395,17 +416,43 @@ To try a larger local prepared cache, edit `DEFAULT_SEARCH_SAMPLE_SIZE` in `util
 ## Tests And Smoke Checks
 
 ```bash
-pipenv run pytest tests/ -v
-python3 -m py_compile app/Main.py app/pages/*.py utils/*.py models/*.py
+# Inside the activated .venv (pytest is in requirements.txt):
+python -m pytest tests/ -q
+python -m py_compile app/Main.py app/pages/*.py utils/*.py models/*.py data/*.py
 ```
+
+The documented `.venv` (built from `requirements.txt`) includes `pytest`, so the suite runs cleanly without extra setup. The full suite is 16 tests.
 
 Current test coverage checks:
 
 - K-Means++ fit, predict, and distance-transform behavior
 - Custom MLP forward pass and training loop behavior
 - Semantic search fallback and borough-filter behavior without downloading a model
+- Recommendation reranking behavior
+- **Preprocessing leakage guard** (`tests/test_preprocess_leakage.py`): asserts the scaler mean/scale, imputation medians, and cuisine vocabulary are learned from the training rows only, that transforming held-out rows never mutates those statistics, and that unseen test categories fall back safely.
 
-During repository review, the Streamlit pages were also smoke-tested with `streamlit.testing.v1.AppTest`; all app entry points loaded with zero page exceptions.
+During repository review, the Streamlit pages were also smoke-tested with `streamlit.testing.v1.AppTest`; all five pages plus the landing page loaded with zero page exceptions on the regenerated data and retrained checkpoint.
+
+---
+
+## Deployment And Security Notes
+
+This project is designed as a local Streamlit demo with committed runtime caches. For a hosted deployment, use the same entry point, `app/Main.py`, and configure secrets through the hosting platform rather than through tracked files.
+
+Recommended deployment settings:
+
+- **Entry point:** `app/Main.py`
+- **Python dependencies:** install from `requirements.txt`
+- **Required runtime files:** the committed cache files under `data/` and `data/cache/`
+- **Optional secret:** `GOOGLE_API_KEY`, used only for Places API (New) restaurant photos and optional cache rebuilds
+- **Ignored local files:** `.streamlit/secrets.toml`, `.venv/`, `.pytest_cache/`, `data/raw_dohmh.csv`, and `data/user_profiles.local.json`
+
+Security checklist before publishing:
+
+- Do not commit `.streamlit/secrets.toml` or real API keys.
+- Keep `data/user_profiles.local.json` untracked because it can contain local usernames, password hashes, salts, and likes.
+- Treat generated model/data caches as reproducible artifacts; rebuild instructions are documented above.
+- Rotate any Google key that has been pasted into chat, screenshots, public logs, or committed history.
 
 ---
 

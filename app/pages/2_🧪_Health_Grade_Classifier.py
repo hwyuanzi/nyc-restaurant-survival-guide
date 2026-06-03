@@ -438,8 +438,11 @@ st.info(
     f"{len(test_df):,}.  Class-weighted CrossEntropy loss, AdamW optimizer, "
     f"early stopping on validation F1.  Best val F1: "
     f"{training_history.best_val_f1*100:.1f}% at epoch "
-    f"{training_history.best_epoch+1}.  The app reports probabilities as "
-    f"risk signals because the no-score feature set is intentionally leakage-reduced.",
+    f"{training_history.best_epoch+1}.  All preprocessing statistics "
+    f"(median imputation, standardization, and the cuisine vocabulary) are fit "
+    f"on the training split only — the held-out rows never influence the feature "
+    f"representation — and probabilities are reported as risk signals because the "
+    f"no-score feature set is intentionally leakage-reduced.",
     icon="🧠",
 )
  

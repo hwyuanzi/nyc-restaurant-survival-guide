@@ -27,9 +27,9 @@
     "cuisine_Juice, Smoothies, Fruit Salads",
     "cuisine_Latin American",
     "cuisine_Mexican",
-    "cuisine_Other",
     "cuisine_Pizza",
-    "cuisine_Spanish"
+    "cuisine_Sandwiches",
+    "cuisine_Other"
   ],
   "input_dim": 25,
   "grade_map": {
@@ -42,8 +42,8 @@
     "Chinese",
     "Coffee/Tea",
     "Pizza",
-    "Latin American",
     "Mexican",
+    "Latin American",
     "Italian",
     "Japanese",
     "Bakery Products/Desserts",
@@ -52,16 +52,48 @@
     "Donuts",
     "Hamburgers",
     "Juice, Smoothies, Fruit Salads",
-    "Spanish"
+    "Sandwiches"
   ],
+  "boro_categories": [
+    "0",
+    "Bronx",
+    "Brooklyn",
+    "Manhattan",
+    "Queens",
+    "Staten Island"
+  ],
+  "cuisine_categories": [
+    "American",
+    "Bakery Products/Desserts",
+    "Caribbean",
+    "Chicken",
+    "Chinese",
+    "Coffee/Tea",
+    "Donuts",
+    "Hamburgers",
+    "Italian",
+    "Japanese",
+    "Juice, Smoothies, Fruit Salads",
+    "Latin American",
+    "Mexican",
+    "Pizza",
+    "Sandwiches",
+    "Other"
+  ],
+  "numerical_medians": {
+    "num_inspections": 2.0,
+    "num_violations": 3.0,
+    "violations_per_inspection": 2.0
+  },
   "scaler_mean": [
-    1.2947656469267472,
-    1.5364861072130227,
-    1.1835590326503882
+    1.9078797893214914,
+    3.6328100795208096,
+    1.902043099590347
   ],
   "scaler_scale": [
-    0.5294239794515305,
-    0.8269436244911319,
-    0.4158984495057435
-  ]
+    0.8084565928926746,
+    2.227645354410567,
+    0.8695338533538152
+  ],
+  "fit_on": "train_split_only"
 }

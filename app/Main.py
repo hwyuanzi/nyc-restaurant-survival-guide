@@ -7,7 +7,8 @@ import streamlit as st
 
 from app.ui_utils import apply_apple_theme
 
-from utils.google_places import build_photo_url, get_google_api_key
+from utils.google_places import get_google_api_key
+from utils.place_photos import get_restaurant_photo_bytes
 from utils.search import price_label, semantic_search, stars
 from utils.search_assets import DEFAULT_SEARCH_SAMPLE_SIZE, load_runtime_assets
 from utils.user_profile import add_liked_restaurant, get_active_profile, init_session_state
@@ -77,7 +78,7 @@ def render_card(row, api_key, profile_name, rank):
     reviews = row.get("g_reviews")
     price = row.get("g_price")
     maps_url = row.get("g_maps_url", "")
-    photo_ref = row.get("g_photo_ref", "")
+    place_id = str(row.get("g_place_id", "") or "").strip()
     cuisine = row.get("cuisine", "")
     boro = row.get("boro", "")
     address = row.get("address", "")
@@ -85,8 +86,9 @@ def render_card(row, api_key, profile_name, rank):
 
     col_img, col_info = st.columns([1, 3])
     with col_img:
-        if photo_ref and api_key:
-            st.image(build_photo_url(photo_ref, api_key), width="stretch")
+        photo_bytes = get_restaurant_photo_bytes(place_id, api_key) if place_id and api_key else None
+        if photo_bytes:
+            st.image(photo_bytes, width="stretch")
         else:
             st.markdown("🍽️")
 

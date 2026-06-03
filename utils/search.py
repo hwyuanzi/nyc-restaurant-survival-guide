@@ -546,51 +546,59 @@ def _extract_query_intent(query):
     }
 
 
-def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min_rating, profile=None, min_match=0.45):
-    profile = profile or {}
+def _expand_query(query, profile):
+    """Stage 0: optionally append profile text, unless the query is already long.
+
+    For long queries the profile text can push important terms past the model's
+    token limit, degrading the embedding, so we skip expansion in that case.
+    """
     profile_text = build_profile_prompt(profile)
-    # For long queries the profile text can push important terms past the model's
-    # 384-token limit, degrading the embedding. Skip profile expansion when the
-    # raw query is already substantial.
     if len(query) > 120:
-        expanded_query = query
-    else:
-        expanded_query = f"{query}. {profile_text}".strip()
-    intent = _extract_query_intent(query)
+        return query
+    return f"{query}. {profile_text}".strip()
 
-    semantic_scores = np.zeros(len(df))
-    semantic_norm = np.zeros(len(df))
-    model = load_model()
-    if embeddings is not None and model is not None:
-        try:
-            query_embedding = model.encode([expanded_query], normalize_embeddings=True)
-            similarities = np.dot(embeddings, query_embedding.T).squeeze()
-            semantic_scores = np.asarray(similarities, dtype=float)
-            # Scale similarities so the top match is boosted towards 0.85
-            # This prevents pure semantic queries (like "cozy") from being fully 
-            # blocked by the absolute min_match=0.55 threshold.
-            max_sim = similarities.max()
-            scale_factor = 0.85 / max(max_sim, 0.3)
-            semantic_norm = np.clip(similarities * scale_factor, 0, 1)
-        except Exception:
-            semantic_norm = np.zeros(len(df))
 
-    lexical_scores = df["description"].fillna("").apply(lambda text: lexical_score(query, text)).to_numpy()
-    name_scores = df.get("dba", pd.Series([""] * len(df), index=df.index)).fillna("").apply(lambda text: lexical_score(query, text)).to_numpy()
-    cuisine_series = df.get("cuisine", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
-    borough_series = df.get("boro", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
-    neighborhood_series = df.get("neighborhood", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
-    zipcode_series = df.get("zipcode", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str).str[:5]
-    summary_series = df.get("g_summary", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
+def _semantic_similarity_norm(expanded_query, embeddings, model, n_rows):
+    """Stage 1: normalised semantic similarity per restaurant.
+
+    Returns an all-zero vector when no embedding model/embeddings are available
+    so the rest of the pipeline degrades gracefully to lexical/structured signals.
+    The top match is scaled toward 0.85 so a pure semantic query is not blocked
+    outright by the absolute ``min_match`` threshold.
+    """
+    if embeddings is None or model is None:
+        return np.zeros(n_rows)
+    try:
+        query_embedding = model.encode([expanded_query], normalize_embeddings=True)
+        similarities = np.asarray(np.dot(embeddings, query_embedding.T).squeeze(), dtype=float)
+        scale_factor = 0.85 / max(similarities.max(), 0.3)
+        return np.clip(similarities * scale_factor, 0, 1)
+    except Exception:
+        return np.zeros(n_rows)
+
+
+def _score_components(query, df, intent, profile):
+    """Stage 2: per-restaurant text, cuisine, location, and quality signals.
+
+    Returns a dict of NumPy arrays / Series.  No thresholds or gating happen
+    here — this stage only constructs the raw signal channels.
+    """
+    n = len(df)
+    lexical_scores = df["description"].fillna("").apply(lambda t: lexical_score(query, t)).to_numpy()
+    name_scores = df.get("dba", pd.Series([""] * n, index=df.index)).fillna("").apply(lambda t: lexical_score(query, t)).to_numpy()
+    cuisine_series = df.get("cuisine", pd.Series([""] * n, index=df.index)).fillna("").astype(str)
+    borough_series = df.get("boro", pd.Series([""] * n, index=df.index)).fillna("").astype(str)
+    neighborhood_series = df.get("neighborhood", pd.Series([""] * n, index=df.index)).fillna("").astype(str)
+    zipcode_series = df.get("zipcode", pd.Series([""] * n, index=df.index)).fillna("").astype(str).str[:5]
+    summary_series = df.get("g_summary", pd.Series([""] * n, index=df.index)).fillna("").astype(str)
     quality_scores = (
         0.5 * pd.to_numeric(df.get("g_rating", 3.4), errors="coerce").fillna(3.4).to_numpy() / 5
         + 0.3 * (1 - pd.to_numeric(df.get("score", 21), errors="coerce").fillna(21).clip(0, 42).to_numpy() / 42)
         + 0.2 * df["grade"].map({"A": 1.0, "B": 0.78, "C": 0.58}).fillna(0.6).to_numpy()
     )
     profile_scores = score_restaurants_for_user(df, profile)["preference_score"].to_numpy() / 10
-    price_series = pd.to_numeric(df.get("g_price", 2), errors="coerce").fillna(2).clip(1, 4)
 
-    cuisine_boost = np.zeros(len(df))
+    cuisine_boost = np.zeros(n)
     if intent["desired_cuisines"]:
         cuisine_boost = np.array([
             _cuisine_intent_match(
@@ -598,35 +606,31 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
                 cuisine_series.iloc[i],
                 f"{df['description'].iloc[i]} {summary_series.iloc[i]} {df['dba'].iloc[i]}",
             )
-            for i in range(len(df))
+            for i in range(n)
         ])
     # Strict cuisine field-only check — used for the relevance gate so that a
     # restaurant whose *description* mentions a cuisine word but whose actual
     # cuisine type doesn't match cannot pass the hard filter.
-    cuisine_field_boost = np.zeros(len(df))
+    cuisine_field_boost = np.zeros(n)
     if intent["desired_cuisines"]:
         cuisine_field_boost = np.array([
             1.0 if any(
                 target.lower() in str(cuisine_series.iloc[i]).lower()
                 for target in intent["desired_cuisines"]
             ) else 0.0
-            for i in range(len(df))
+            for i in range(n)
         ])
-    cuisine_query_present = len(intent["desired_cuisines"]) > 0
-    structured_intent_present = bool(
-        intent["has_location"] or cuisine_query_present or intent["desired_price"] is not None
-    )
 
-    borough_boost = np.zeros(len(df))
+    borough_boost = np.zeros(n)
     if intent["borough"]:
         borough_boost = borough_series.str.lower().eq(intent["borough"].lower()).astype(float).to_numpy()
 
-    neighborhood_boost = np.zeros(len(df))
+    neighborhood_boost = np.zeros(n)
     if intent["neighborhood"]:
         normalized_neighborhoods = neighborhood_series.map(_normalize_location_text)
         neighborhood_boost = normalized_neighborhoods.eq(_normalize_location_text(intent["neighborhood"])).astype(float).to_numpy()
 
-    zipcode_boost = np.zeros(len(df))
+    zipcode_boost = np.zeros(n)
     if intent["neighborhood_zipcodes"]:
         zipcode_boost = zipcode_series.isin(intent["neighborhood_zipcodes"]).astype(float).to_numpy()
     elif intent["zipcode"]:
@@ -634,17 +638,31 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
 
     location_match = np.maximum.reduce([neighborhood_boost, borough_boost, zipcode_boost])
 
-    price_boost = np.zeros(len(df))
-    if intent["desired_price"] is not None:
-        price_boost = (1 - (price_series - intent["desired_price"]).abs() / 3).clip(0, 1).to_numpy()
-
-    keyword_boost = np.zeros(len(df))
+    keyword_boost = np.zeros(n)
     if intent["tokens"]:
         searchable_text = df["description"].fillna("").astype(str)
         keyword_boost = searchable_text.apply(
             lambda text: _count_token_matches(intent["tokens"], text) / max(len(intent["tokens"]), 1)
         ).to_numpy()
 
+    return {
+        "lexical_scores": lexical_scores,
+        "name_scores": name_scores,
+        "quality_scores": quality_scores,
+        "profile_scores": profile_scores,
+        "price_series": pd.to_numeric(df.get("g_price", 2), errors="coerce").fillna(2).clip(1, 4),
+        "cuisine_boost": cuisine_boost,
+        "cuisine_field_boost": cuisine_field_boost,
+        "borough_boost": borough_boost,
+        "neighborhood_boost": neighborhood_boost,
+        "zipcode_boost": zipcode_boost,
+        "location_match": location_match,
+        "keyword_boost": keyword_boost,
+    }
+
+
+def _filter_mask(df, boro_filter, grade_filter, min_rating):
+    """Stage 3: hard user filters (borough, grade, minimum rating)."""
     mask = np.ones(len(df), dtype=bool)
     if boro_filter != "All":
         mask &= df["boro"].str.lower() == boro_filter.lower()
@@ -652,88 +670,98 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
         mask &= df["grade"] == grade_filter
     if min_rating > 0:
         mask &= pd.to_numeric(df.get("g_rating", 0), errors="coerce").fillna(0) >= min_rating
+    return mask
 
-    # Fix Hubness / Generic Bleed: Penalize restaurants with no Google summary in pure semantic searches
+
+def _base_signal(df, comp, semantic_norm):
+    """Stage 4: weighted blend of all positive signals, floored by pure signals."""
     has_summary = df["g_summary"].notna() & (df["g_summary"].str.strip() != "")
     adjusted_semantic_norm = semantic_norm * np.where(has_summary, 1.0, 0.6)
 
-    base_signal = (
+    base = (
         0.28 * adjusted_semantic_norm
-        + 0.16 * lexical_scores
-        + 0.1 * name_scores
-        + 0.08 * keyword_boost
-        + 0.16 * cuisine_boost
-        + 0.18 * zipcode_boost
-        + 0.16 * neighborhood_boost
-        + 0.12 * borough_boost
+        + 0.16 * comp["lexical_scores"]
+        + 0.1 * comp["name_scores"]
+        + 0.08 * comp["keyword_boost"]
+        + 0.16 * comp["cuisine_boost"]
+        + 0.18 * comp["zipcode_boost"]
+        + 0.16 * comp["neighborhood_boost"]
+        + 0.12 * comp["borough_boost"]
     )
-    # Prevent pure semantic or pure exact-match queries from being over-diluted
-    # by taking the maximum of the weighted sum and the pure signals.
-    base_signal = np.maximum.reduce([
-        base_signal,
-        adjusted_semantic_norm,
-        lexical_scores * 0.85
-    ])
+    # Prevent pure semantic or pure exact-match queries from being over-diluted.
+    return np.maximum.reduce([base, adjusted_semantic_norm, comp["lexical_scores"] * 0.85])
 
+
+def _quality_and_penalties(df, intent, price_series):
+    """Stage 5a: premium-vibe quality weighting plus the institutional penalty."""
     if intent.get("is_premium_vibe"):
         quality_weight = 0.15
         premium_penalty = np.where(pd.to_numeric(df.get("g_rating", 0), errors="coerce").fillna(0) < 4.2, -0.15, 0)
-        # Actively push $$$ and $$$$ restaurants to the top for dating/luxury queries
+        # Actively push $$$ and $$$$ restaurants to the top for dating/luxury queries.
         premium_penalty = premium_penalty + np.where(price_series >= 3, 0.25, 0)
         premium_penalty = premium_penalty + np.where(price_series < 2, -0.15, 0)
     else:
         quality_weight = 0.03
         premium_penalty = 0
 
-    # Institutional Penalty: penalize non-restaurants (catering, theater, hospital, equity) 
     institutional_keywords = ["catering", "theatre", "theater", "equity", "hospital", "school", "university", "terminal", "stadium", "club", "eqx", "fitness", "center"]
     is_institutional = df["dba"].fillna("").str.lower().apply(lambda x: any(k in x for k in institutional_keywords)).to_numpy()
     institutional_penalty = np.where(is_institutional, -0.6, 0.0)
+    return quality_weight, premium_penalty, institutional_penalty
 
-    # Multiplicative Cascade & Base Boost for Explicit Intents
+
+def _price_cascade(df, intent, price_series, premium_penalty, institutional_penalty):
+    """Stage 5b: multiplicative price-intent cascade and extra penalties.
+
+    Returns updated (cascade_multiplier, intent_signal, premium_penalty,
+    institutional_penalty).  Only fires when the query expressed a price intent.
+    """
     cascade_multiplier = np.ones(len(df))
     intent_signal = np.zeros(len(df))
-    if intent["desired_price"] is not None:
-        if intent["desired_price"] <= 2:
-            cascade_multiplier *= np.where(price_series == 1, 1.5, np.where(price_series == 2, 1.2, np.where(price_series == 3, 0.5, 0.3)))
-            intent_signal = np.where(price_series == 1, 0.8, np.where(price_series == 2, 0.5, 0.0))
-            # Nuke low-quality fast food from 'cheap' searches
-            premium_penalty = premium_penalty + np.where(pd.to_numeric(df.get("g_rating", 0), errors="coerce").fillna(0) < 4.0, -0.4, 0.0)
-        else:
-            cascade_multiplier *= np.where(price_series >= 4, 1.5, np.where(price_series == 3, 1.2, np.where(price_series == 2, 0.5, 0.3)))
-            intent_signal = np.where(price_series >= 4, 0.8, np.where(price_series == 3, 0.5, 0.0))
-            # Nuke snacks/coffee shops from 'expensive' fine dining searches
-            snack_cuisines = ["Coffee/Tea", "Bakery Products/Desserts", "Juice, Smoothies, Fruit Salads", "Bagels/Pretzels", "Donuts", "Frozen Desserts"]
-            is_snack = df["cuisine"].isin(snack_cuisines).to_numpy()
-            premium_penalty = premium_penalty + np.where(is_snack, -0.5, 0.0)
-            
-            # Nuke suspicious luxury places (Google API glitch: cheap places tagged as $$$$ usually have ratings < 4.3)
-            suspicious_luxury = (price_series == 4) & (pd.to_numeric(df.get("g_rating", 0), errors="coerce").fillna(0) < 4.3)
-            premium_penalty = premium_penalty + np.where(suspicious_luxury, -0.6, 0.0)
-            
-            # Additional penalty for sneaky hotel/building locations
-            sneaky_hotels = ["hotel", "palace", "residence", "plaza"]
-            is_sneaky = df["dba"].fillna("").str.lower().apply(lambda x: any(k in x for k in sneaky_hotels)).to_numpy()
-            institutional_penalty = institutional_penalty + np.where(is_sneaky, -0.4, 0.0)
+    if intent["desired_price"] is None:
+        return cascade_multiplier, intent_signal, premium_penalty, institutional_penalty
 
-    filtered_scores = np.where(
-        mask,
-        (base_signal + intent_signal + quality_weight * quality_scores + premium_penalty + institutional_penalty + 0.02 * profile_scores) * cascade_multiplier,
-        -1.0,
-    )
-    strong_text_signal = np.maximum.reduce([lexical_scores, name_scores, keyword_boost])
+    if intent["desired_price"] <= 2:
+        cascade_multiplier *= np.where(price_series == 1, 1.5, np.where(price_series == 2, 1.2, np.where(price_series == 3, 0.5, 0.3)))
+        intent_signal = np.where(price_series == 1, 0.8, np.where(price_series == 2, 0.5, 0.0))
+        # Nuke low-quality fast food from 'cheap' searches.
+        premium_penalty = premium_penalty + np.where(pd.to_numeric(df.get("g_rating", 0), errors="coerce").fillna(0) < 4.0, -0.4, 0.0)
+    else:
+        cascade_multiplier *= np.where(price_series >= 4, 1.5, np.where(price_series == 3, 1.2, np.where(price_series == 2, 0.5, 0.3)))
+        intent_signal = np.where(price_series >= 4, 0.8, np.where(price_series == 3, 0.5, 0.0))
+        # Nuke snacks/coffee shops from 'expensive' fine dining searches.
+        snack_cuisines = ["Coffee/Tea", "Bakery Products/Desserts", "Juice, Smoothies, Fruit Salads", "Bagels/Pretzels", "Donuts", "Frozen Desserts"]
+        is_snack = df["cuisine"].isin(snack_cuisines).to_numpy()
+        premium_penalty = premium_penalty + np.where(is_snack, -0.5, 0.0)
+        # Nuke suspicious luxury places (Google API glitch: cheap places tagged $$$$ usually rate < 4.3).
+        suspicious_luxury = (price_series == 4) & (pd.to_numeric(df.get("g_rating", 0), errors="coerce").fillna(0) < 4.3)
+        premium_penalty = premium_penalty + np.where(suspicious_luxury, -0.6, 0.0)
+        # Additional penalty for sneaky hotel/building locations.
+        sneaky_hotels = ["hotel", "palace", "residence", "plaza"]
+        is_sneaky = df["dba"].fillna("").str.lower().apply(lambda x: any(k in x for k in sneaky_hotels)).to_numpy()
+        institutional_penalty = institutional_penalty + np.where(is_sneaky, -0.4, 0.0)
+
+    return cascade_multiplier, intent_signal, premium_penalty, institutional_penalty
+
+
+def _relevance_gate(intent, comp, semantic_norm, semantic_floor, min_match):
+    """Stage 6: boolean keep/drop gate combining text, cuisine, and location.
+
+    A restaurant must clear at least one strong relevance signal and any
+    location / cuisine intent the query expressed before it can be ranked.
+    """
+    lexical_scores = comp["lexical_scores"]
+    cuisine_boost = comp["cuisine_boost"]
+    location_match = comp["location_match"]
+    price_series = comp["price_series"]
+
+    strong_text_signal = np.maximum.reduce([lexical_scores, comp["name_scores"], comp["keyword_boost"]])
     query_signal = np.maximum.reduce([
-        semantic_norm,
-        lexical_scores,
-        name_scores,
-        keyword_boost,
-        cuisine_boost,
-        neighborhood_boost,
-        borough_boost,
-        zipcode_boost,
+        semantic_norm, lexical_scores, comp["name_scores"], comp["keyword_boost"],
+        cuisine_boost, comp["neighborhood_boost"], comp["borough_boost"], comp["zipcode_boost"],
     ])
-    semantic_floor = max(min_match - 0.1, 0.4) if embeddings is not None and model is not None else 0.0
-    relevance_gate = (
+
+    gate = (
         (semantic_norm >= semantic_floor)
         | (strong_text_signal >= 0.34)
         | (cuisine_boost >= 1.0)
@@ -741,35 +769,74 @@ def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min
 
     if intent["desired_price"] is not None:
         if intent["desired_price"] <= 2:
-            relevance_gate = relevance_gate | (price_series <= 2)
+            gate = gate | (price_series <= 2)
         else:
-            relevance_gate = relevance_gate | (price_series >= 3)
+            gate = gate | (price_series >= 3)
 
-    relevance_gate = relevance_gate & (query_signal >= 0.12)
+    gate = gate & (query_signal >= 0.12)
 
     if intent["has_location"]:
-        relevance_gate = relevance_gate & (location_match >= 1.0)
+        gate = gate & (location_match >= 1.0)
+    cuisine_query_present = len(intent["desired_cuisines"]) > 0
     if cuisine_query_present and not intent["has_location"]:
-        # Gate on the cuisine *field* (not description text) to prevent restaurants
-        # that merely mention a cuisine in their summary from slipping through.
-        # High semantic similarity is an escape hatch for correctly typed but
-        # unorthodoxly-tagged restaurants (e.g., a Japanese place that specialises
-        # in oysters will score high semantically even without "Seafood" as cuisine).
-        relevance_gate = relevance_gate & (
-            (cuisine_field_boost >= 1.0) | (semantic_norm >= 0.65)
-        )
+        # Gate on the cuisine *field* (not description text) so restaurants that
+        # merely mention a cuisine in their summary cannot slip through.  High
+        # semantic similarity is the escape hatch for correctly typed but
+        # unorthodoxly-tagged restaurants.
+        gate = gate & ((comp["cuisine_field_boost"] >= 1.0) | (semantic_norm >= 0.65))
 
+    return gate, strong_text_signal
+
+
+def semantic_search(query, df, embeddings, top_k, boro_filter, grade_filter, min_rating, profile=None, min_match=0.45):
+    """Rank restaurants for a query through clear staged steps.
+
+    The pipeline is intentionally factored into small stages so each can be
+    reviewed independently: query expansion, semantic similarity, signal
+    components, hard filters, signal blending, price cascade, relevance gating,
+    and final ranking.
+    """
+    profile = profile or {}
+    expanded_query = _expand_query(query, profile)
+    intent = _extract_query_intent(query)
+    model = load_model()
+
+    semantic_norm = _semantic_similarity_norm(expanded_query, embeddings, model, len(df))
+    comp = _score_components(query, df, intent, profile)
+    price_series = comp["price_series"]
+
+    mask = _filter_mask(df, boro_filter, grade_filter, min_rating)
+    base_signal = _base_signal(df, comp, semantic_norm)
+
+    quality_weight, premium_penalty, institutional_penalty = _quality_and_penalties(df, intent, price_series)
+    cascade_multiplier, intent_signal, premium_penalty, institutional_penalty = _price_cascade(
+        df, intent, price_series, premium_penalty, institutional_penalty
+    )
+
+    filtered_scores = np.where(
+        mask,
+        (base_signal + intent_signal + quality_weight * comp["quality_scores"]
+         + premium_penalty + institutional_penalty + 0.02 * comp["profile_scores"]) * cascade_multiplier,
+        -1.0,
+    )
+
+    semantic_floor = max(min_match - 0.1, 0.4) if embeddings is not None and model is not None else 0.0
+    relevance_gate, strong_text_signal = _relevance_gate(
+        intent, comp, semantic_norm, semantic_floor, min_match
+    )
+
+    cuisine_query_present = len(intent["desired_cuisines"]) > 0
     if intent["has_location"] and cuisine_query_present:
         filtered_scores = np.where(
             mask,
-            filtered_scores + 0.12 * np.minimum(location_match, cuisine_boost),
+            filtered_scores + 0.12 * np.minimum(comp["location_match"], comp["cuisine_boost"]),
             filtered_scores,
         )
         cuisine_location_gate = (
-            (location_match >= 1.0)
+            (comp["location_match"] >= 1.0)
             & (
-                (cuisine_field_boost >= 1.0)
-                | (cuisine_boost >= 1.0)
+                (comp["cuisine_field_boost"] >= 1.0)
+                | (comp["cuisine_boost"] >= 1.0)
                 | ((semantic_norm >= 0.62) & (strong_text_signal >= 0.45))
             )
         )
