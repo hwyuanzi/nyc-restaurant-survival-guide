@@ -17,6 +17,7 @@ The repository is set up to run locally without live downloads. The prepared res
 | Course algorithm implementation | `models/kmeans_scratch.py` implements K-Means++ directly in NumPy, including initialization, assignment, centroid updates, empty-cluster handling, convergence, and multi-start model selection. |
 | ML coherence | Semantic retrieval, health-grade classification, clustering, PCA visualization, K selection, and recommendation reranking all operate on documented data representations. |
 | Usability | Pages include labeled controls, constrained filters, cached runtime assets, error messages for missing data, and a login/profile flow for saving likes. |
+| Deployment | `Dockerfile` and `render.yaml` provide a reproducible Python 3.12 deployment, CPU-only PyTorch, HTTP health checks, secret injection, and persistent profile storage. |
 | Repository hygiene | Active code is under `app/`, `models/`, `utils/`, `data/`, and `tests/`. Obsolete checkpoint-only modules and old cache files have been removed. The largest orchestration functions (`semantic_search`, `_build_cluster_profiles`) are factored into small, single-responsibility stages for easier review. |
 | Evaluation integrity | Health-classifier preprocessing is fit on the training split only, with an explicit `fit`/`transform` preprocessor, a persisted fitted object, and a regression test guarding against leakage. |
 
@@ -91,7 +92,7 @@ pipenv run streamlit run app/Main.py
 
 ## Step-By-Step App Use
 
-1. **Log in or create an account.** User accounts are stored locally in `data/user_profiles.local.json`; no external authentication service is used. This runtime file is ignored by Git so personal profiles, liked restaurants, password hashes, and salts are not committed.
+1. **Log in or create an account.** User accounts are stored in `data/user_profiles.local.json` locally, or at `USER_PROFILES_PATH` when configured for deployment. The runtime file is ignored by Git so personal profiles, liked restaurants, password hashes, and salts are not committed.
 2. **Start on the Home page.** Try one of the suggested restaurant queries, review the result cards, and click "Like this restaurant" on places you would actually want.
 3. **Open Semantic Search.** Use natural language such as `cozy Italian pasta in Brooklyn`, `late night ramen Manhattan`, or `cheap Caribbean food Bronx`. The page uses cached sentence embeddings when available and falls back gracefully if the embedding model cannot load.
 4. **Open Health Grade Risk Classifier.** Select a held-out restaurant, inspect predicted A/B/C risk probabilities, change inspection-pattern inputs, and review feature importance plus the constrained "Path to A" analysis.
@@ -192,9 +193,11 @@ You do not need to open the GIS Map page first. Any of these pages can load the 
 
 The prepared search sample starts from `3,800` candidate restaurants and keeps `2,835` restaurants after Google enrichment and validity filters. A larger prepared dataset could improve search and recommendation coverage, especially for rare cuisines and neighborhoods. For the submitted project, the cache size is deliberately moderate so the repository stays lightweight, starts quickly on a local laptop, and still lets users rebuild a larger local cache from NYC DOHMH plus Google Places if they want more coverage.
 
-### Local Profile Storage
+### Profile Storage
 
-Runtime accounts are written to `data/user_profiles.local.json`, which is ignored by Git. The committed `data/user_profiles.json` and `data/user_profiles.example.json` are empty placeholders only. New profiles store only account metadata, password hash/salt, and `likes`. Likes are added from Home or Semantic Search result cards; the Recommendation sidebar shows the active profile's liked restaurants and lets the user remove one. The recommendation page intentionally ranks from liked restaurants only, so cuisine, borough, budget, spice, and vibe preference fields are not created by default.
+Runtime accounts are written to `data/user_profiles.local.json` by default, or to the path in the `USER_PROFILES_PATH` environment variable. The default file is ignored by Git; the committed `data/user_profiles.json` and `data/user_profiles.example.json` are empty placeholders only. Writes use an atomic file replacement and a process-wide lock so simultaneous Streamlit sessions cannot read partially written JSON. The Render deployment mounts `/app/storage` and sets `USER_PROFILES_PATH=/app/storage/user_profiles.json`, so accounts and liked history survive restarts and redeploys.
+
+New passwords are stored with salted PBKDF2-HMAC-SHA256 (600,000 iterations). Profiles created by an earlier version with the legacy salted SHA-256 format still work and are upgraded after their next successful login. This JSON store is intended for a single app instance; use a managed database before scaling the service to multiple instances.
 
 ---
 
@@ -297,6 +300,7 @@ The Recommendation sidebar is intentionally limited to the active profile's save
 
 ```text
 nyc-restaurant-survival-guide/
+├── .github/workflows/ci.yml
 ├── .streamlit/
 │   ├── config.toml
 │   └── secrets.toml.example
@@ -335,8 +339,11 @@ nyc-restaurant-survival-guide/
 │   ├── custom_mlp.py
 │   ├── kmeans_scratch.py
 │   └── train_health_classifier.py
+├── scripts/
+│   └── smoke_test_app.py
 ├── tests/
 │   ├── __init__.py
+│   ├── test_auth.py
 │   ├── test_custom_mlp.py
 │   ├── test_kmeans_scratch.py
 │   ├── test_preprocess_leakage.py
@@ -353,9 +360,12 @@ nyc-restaurant-survival-guide/
 │   ├── search_assets.py
 │   └── user_profile.py
 ├── .gitignore
+├── .dockerignore
+├── Dockerfile
 ├── LICENSE
 ├── requirements.txt
 ├── Pipfile
+├── render.yaml
 └── README.md
 ```
 
@@ -419,9 +429,10 @@ To try a larger local prepared cache, edit `DEFAULT_SEARCH_SAMPLE_SIZE` in `util
 # Inside the activated .venv (pytest is in requirements.txt):
 python -m pytest tests/ -q
 python -m py_compile app/Main.py app/pages/*.py utils/*.py models/*.py data/*.py
+python scripts/smoke_test_app.py
 ```
 
-The documented `.venv` (built from `requirements.txt`) includes `pytest`, so the suite runs cleanly without extra setup. The full suite is 16 tests.
+The documented `.venv` (built from `requirements.txt`) includes `pytest`, so the suite runs cleanly without extra setup. The full suite is 20 tests. GitHub Actions repeats compilation, the test suite, and the six-entry-point page smoke test on every push to `main` and on pull requests using Python 3.12 and the CPU-only PyTorch wheel.
 
 Current test coverage checks:
 
@@ -429,28 +440,36 @@ Current test coverage checks:
 - Custom MLP forward pass and training loop behavior
 - Semantic search fallback and borough-filter behavior without downloading a model
 - Recommendation reranking behavior
+- Account registration/authentication, PBKDF2 password storage, legacy-hash migration, and atomic profile writes
 - **Preprocessing leakage guard** (`tests/test_preprocess_leakage.py`): asserts the scaler mean/scale, imputation medians, and cuisine vocabulary are learned from the training rows only, that transforming held-out rows never mutates those statistics, and that unseen test categories fall back safely.
 
-During repository review, the Streamlit pages were also smoke-tested with `streamlit.testing.v1.AppTest`; all five pages plus the landing page loaded with zero page exceptions on the regenerated data and retrained checkpoint.
+During repository review, the Streamlit pages were also smoke-tested with `streamlit.testing.v1.AppTest`; all five pages plus the landing page loaded with zero page exceptions using the committed runtime data and checkpoint.
 
 ---
 
 ## Deployment And Security Notes
 
-This project is designed as a local Streamlit demo with committed runtime caches. For a hosted deployment, use the same entry point, `app/Main.py`, and configure secrets through the hosting platform rather than through tracked files.
+The repository is ready for a container-based Render deployment. The included Blueprint selects a Standard web service because the app loads PyTorch, transformer search components, Plotly, and committed ML caches; it also adds a 1 GB persistent disk for accounts and likes. Render services and disks are billed resources, so review the selected plan before confirming the Blueprint.
 
-Recommended deployment settings:
+### Deploy On Render
 
-- **Entry point:** `app/Main.py`
-- **Python dependencies:** install from `requirements.txt`
-- **Required runtime files:** the committed cache files under `data/` and `data/cache/`
-- **Optional secret:** `GOOGLE_API_KEY`, used only for Places API (New) restaurant photos and optional cache rebuilds
-- **Ignored local files:** `.streamlit/secrets.toml`, `.venv/`, `.pytest_cache/`, `data/raw_dohmh.csv`, and `data/user_profiles.local.json`
+1. In Render, choose **New → Blueprint** and connect `hwyuanzi/nyc-restaurant-survival-guide`. Render detects `render.yaml` from `main` and builds the included `Dockerfile`.
+2. Enter `GOOGLE_API_KEY` when prompted, or leave photos disabled and add the secret later. Never put the real value in `render.yaml`.
+3. Wait for `/_stcore/health` to pass, then open the generated `*.onrender.com` URL. Future pushes to `main` trigger a new deployment.
+4. In the service's **Settings → Custom Domains**, add `foodguide.hyuan.io`.
+5. At the DNS provider for `hyuan.io`, create the CNAME record Render shows (normally host `foodguide` pointing to the service's `*.onrender.com` hostname), then return to Render and verify it. Render provisions and renews TLS automatically and redirects HTTP to HTTPS. Follow Render's provider-specific instructions if Cloudflare proxying or existing `AAAA` records are enabled.
 
-Security checklist before publishing:
+The container binds Streamlit to the platform's `PORT` on `0.0.0.0`, runs as a non-root user, installs the official CPU-only PyTorch wheel, excludes local secrets/raw data from its build context, and exposes both Docker and Render health checks. The persistent disk is mounted at `/app/storage` and is the only place where deployed profile writes are retained.
+
+### Streamlit Community Cloud Alternative
+
+For a quick free demo, create an app from this GitHub repository, choose branch `main`, entry point `app/Main.py`, and Python 3.12, then add `GOOGLE_API_KEY` in the platform's Secrets settings. Community Cloud provides a customizable `*.streamlit.app` subdomain, but its app filesystem is ephemeral; account persistence and the direct `foodguide.hyuan.io` setup above are why Render is the recommended path for this project.
+
+### Security Checklist
 
 - Do not commit `.streamlit/secrets.toml` or real API keys.
-- Keep `data/user_profiles.local.json` untracked because it can contain local usernames, password hashes, salts, and likes.
+- Keep `data/user_profiles.local.json` untracked because it can contain local usernames, password hashes, salts, preferences, and likes.
+- Restrict the Google key to Places API (New), set an appropriate quota, and add application restrictions supported by the deployment setup.
 - Treat generated model/data caches as reproducible artifacts; rebuild instructions are documented above.
 - Rotate any Google key that has been pasted into chat, screenshots, public logs, or committed history.
 

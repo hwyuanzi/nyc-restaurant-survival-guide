@@ -9,3 +9,11 @@ secondaryBackgroundColor = "#FFFFFF"
 textColor = "#1D1D1F"
 # Apple system font natively maps to these standard sans serifs
 font = "sans serif"
+
+[server]
+headless = true
+enableCORS = true
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false

@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: nyc-restaurant-survival-guide
+    runtime: docker
+    branch: main
+    plan: standard
+    region: virginia
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: USER_PROFILES_PATH
+        value: /app/storage/user_profiles.json
+    disk:
+      name: profile-data
+      mountPath: /app/storage
+      sizeGB: 1

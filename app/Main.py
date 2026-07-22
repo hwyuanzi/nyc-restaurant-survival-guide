@@ -60,7 +60,12 @@ if not st.session_state["authenticated_profile_id"]:
 
     with tab_signup:
         signup_username = st.text_input("Choose a Username", key="signup_username")
-        signup_password = st.text_input("Choose a Password", type="password", key="signup_password")
+        signup_password = st.text_input(
+            "Choose a Password",
+            type="password",
+            key="signup_password",
+            help="Use at least 8 characters.",
+        )
         if st.button("Sign Up", width="stretch"):
             success, result = register_user(signup_username, signup_password)
             if success:
@@ -153,7 +158,7 @@ with hero_left:
     st.subheader("What's Inside")
     st.markdown(
         """
-        **Data** — 14,252 NYC DOHMH inspection records (train + test) enriched with 2,835 Google Places rows including ratings, reviews, price tier, and photos.
+        **Data** — 24,208 aggregated NYC DOHMH restaurant profiles (train + test) plus 2,835 Google-enriched search rows with ratings, reviews, price tier, and optional photos.
 
         **Course ML implementation:**
         - K-Means++ (`models/kmeans_scratch.py`) — default clustering engine

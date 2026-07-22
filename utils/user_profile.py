@@ -1,5 +1,8 @@
 import json
+import os
 import re
+import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -8,7 +11,11 @@ import pandas as pd
 import streamlit as st
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-USER_PROFILES_PATH = DATA_DIR / "user_profiles.local.json"
+DEFAULT_USER_PROFILES_PATH = DATA_DIR / "user_profiles.local.json"
+USER_PROFILES_PATH = Path(
+    os.environ.get("USER_PROFILES_PATH", str(DEFAULT_USER_PROFILES_PATH))
+).expanduser()
+PROFILE_STORE_LOCK = threading.RLock()
 DEFAULT_PROFILE_ID = "guest"
 
 CUISINE_OPTIONS = [
@@ -89,14 +96,22 @@ def _default_profile(name="Guest", profile_id=None):
 
 
 def load_profiles():
-    if not USER_PROFILES_PATH.exists():
-        return {}
-    try:
-        with USER_PROFILES_PATH.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    """Load profiles from the configured JSON store.
+
+    ``USER_PROFILES_PATH`` can point at a mounted persistent disk in a hosted
+    deployment. Reads and writes share a process-wide re-entrant lock, and
+    writes are atomic, so concurrent Streamlit sessions cannot observe a
+    partially written JSON document.
+    """
+    with PROFILE_STORE_LOCK:
+        if not USER_PROFILES_PATH.exists():
+            return {}
+        try:
+            with USER_PROFILES_PATH.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+                return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
 
 
 def find_profile_by_name(name):
@@ -110,39 +125,58 @@ def find_profile_by_name(name):
 
 
 def save_profiles(profiles):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with USER_PROFILES_PATH.open("w", encoding="utf-8") as file:
-        json.dump(profiles, file, indent=2)
+    """Atomically replace the profile store with ``profiles``."""
+    with PROFILE_STORE_LOCK:
+        USER_PROFILES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        file_descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{USER_PROFILES_PATH.name}.",
+            suffix=".tmp",
+            dir=USER_PROFILES_PATH.parent,
+        )
+        try:
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as file:
+                json.dump(profiles, file, indent=2)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary_path, USER_PROFILES_PATH)
+        except Exception:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+            raise
 
 
 def get_profile(profile_id=None, name=None):
-    profiles = load_profiles()
-    if profile_id and profile_id in profiles:
-        return profiles[profile_id]
+    with PROFILE_STORE_LOCK:
+        profiles = load_profiles()
+        if profile_id and profile_id in profiles:
+            return profiles[profile_id]
 
-    if name:
-        existing = find_profile_by_name(name)
-        if existing:
-            return existing
+        if name:
+            existing = find_profile_by_name(name)
+            if existing:
+                return existing
 
-    if profiles:
-        first_key = next(iter(profiles))
-        return profiles[first_key]
+        if profiles:
+            first_key = next(iter(profiles))
+            return profiles[first_key]
 
-    guest_profile = _default_profile()
-    profiles[guest_profile["id"]] = guest_profile
-    save_profiles(profiles)
-    return guest_profile
+        guest_profile = _default_profile()
+        profiles[guest_profile["id"]] = guest_profile
+        save_profiles(profiles)
+        return guest_profile
 
 
 def upsert_profile(profile):
-    profiles = load_profiles()
-    profile = profile.copy()
-    profile.setdefault("created_at", _now_iso())
-    profile["updated_at"] = _now_iso()
-    profiles[profile["id"]] = profile
-    save_profiles(profiles)
-    return profile
+    with PROFILE_STORE_LOCK:
+        profiles = load_profiles()
+        profile = profile.copy()
+        profile.setdefault("created_at", _now_iso())
+        profile["updated_at"] = _now_iso()
+        profiles[profile["id"]] = profile
+        save_profiles(profiles)
+        return profile
 
 
 def _series_from_candidates(df, candidates, default=""):
@@ -385,11 +419,12 @@ def init_session_state():
 
 
 def _persist_profile_updates(profile_id, **updates):
-    profile = get_profile(profile_id=profile_id)
-    profile.update(updates)
-    if updates:
-        profile["survey_completed"] = True
-    return upsert_profile(profile)
+    with PROFILE_STORE_LOCK:
+        profile = get_profile(profile_id=profile_id)
+        profile.update(updates)
+        if updates:
+            profile["survey_completed"] = True
+        return upsert_profile(profile)
 
 
 def render_profile_sidebar():
@@ -462,7 +497,12 @@ def render_profile_sidebar():
     with st.expander("Account Management"):
         st.caption("Update your password or permanently delete this profile.")
         current_password = st.text_input("Current password", type="password", key="account_current_password")
-        new_password = st.text_input("New password", type="password", key="account_new_password")
+        new_password = st.text_input(
+            "New password",
+            type="password",
+            key="account_new_password",
+            help="Use at least 8 characters.",
+        )
         confirm_password = st.text_input("Confirm new password", type="password", key="account_confirm_password")
 
         if st.button("Update password", width="stretch"):
@@ -524,45 +564,46 @@ def get_active_profile():
 
 
 def add_liked_restaurant(profile_name, restaurant_row, source="app"):
-    profiles = load_profiles()
-    profile = get_profile(name=profile_name)
-    profile_id = profile["id"]
-    likes = profile.get("likes", [])
+    with PROFILE_STORE_LOCK:
+        profiles = load_profiles()
+        profile = get_profile(name=profile_name)
+        profile_id = profile["id"]
+        likes = profile.get("likes", [])
 
-    camis = restaurant_row.get("camis") or restaurant_row.get("restaurant_id")
-    restaurant_id = str(
-        restaurant_row.get("restaurant_id")
-        or restaurant_row.get("camis")
-        or restaurant_row.get("g_place_id")
-        or restaurant_row.get("dba")
-    )
-    camis_text = str(camis).strip() if camis is not None and str(camis).strip() else ""
+        camis = restaurant_row.get("camis") or restaurant_row.get("restaurant_id")
+        restaurant_id = str(
+            restaurant_row.get("restaurant_id")
+            or restaurant_row.get("camis")
+            or restaurant_row.get("g_place_id")
+            or restaurant_row.get("dba")
+        )
+        camis_text = str(camis).strip() if camis is not None and str(camis).strip() else ""
 
-    if any(
-        str(item.get("restaurant_id")) == restaurant_id
-        or (camis_text and str(item.get("camis", "")).strip() == camis_text)
-        for item in likes
-    ):
-        return False
+        if any(
+            str(item.get("restaurant_id")) == restaurant_id
+            or (camis_text and str(item.get("camis", "")).strip() == camis_text)
+            for item in likes
+        ):
+            return False
 
-    like_record = {
-        "restaurant_id": restaurant_id,
-        "camis": camis_text,
-        "g_place_id": str(restaurant_row.get("g_place_id", "")).strip(),
-        "dba": restaurant_row.get("dba") or restaurant_row.get("name", "Unknown"),
-        "cuisine": restaurant_row.get("cuisine") or restaurant_row.get("cuisine_type", ""),
-        "boro": restaurant_row.get("boro") or restaurant_row.get("neighborhood", ""),
-        "grade": restaurant_row.get("grade", "N/A"),
-        "score": int(pd.to_numeric(restaurant_row.get("score", 0), errors="coerce") or 0),
-        "source": source,
-        "liked_at": _now_iso(),
-    }
-    likes.append(like_record)
-    profile["likes"] = likes
-    profile["survey_completed"] = True
-    profile["updated_at"] = _now_iso()
-    profiles[profile_id] = profile
-    save_profiles(profiles)
+        like_record = {
+            "restaurant_id": restaurant_id,
+            "camis": camis_text,
+            "g_place_id": str(restaurant_row.get("g_place_id", "")).strip(),
+            "dba": restaurant_row.get("dba") or restaurant_row.get("name", "Unknown"),
+            "cuisine": restaurant_row.get("cuisine") or restaurant_row.get("cuisine_type", ""),
+            "boro": restaurant_row.get("boro") or restaurant_row.get("neighborhood", ""),
+            "grade": restaurant_row.get("grade", "N/A"),
+            "score": int(pd.to_numeric(restaurant_row.get("score", 0), errors="coerce") or 0),
+            "source": source,
+            "liked_at": _now_iso(),
+        }
+        likes.append(like_record)
+        profile["likes"] = likes
+        profile["survey_completed"] = True
+        profile["updated_at"] = _now_iso()
+        profiles[profile_id] = profile
+        save_profiles(profiles)
 
     st.session_state["user_history"] = profile_to_user_history(profile)
     return True
@@ -587,34 +628,35 @@ def is_restaurant_liked(profile_name, restaurant_row):
 
 
 def remove_liked_restaurant(profile_name, restaurant_row):
-    profiles = load_profiles()
-    profile = get_profile(name=profile_name)
-    profile_id = profile["id"]
-    likes = profile.get("likes", [])
+    with PROFILE_STORE_LOCK:
+        profiles = load_profiles()
+        profile = get_profile(name=profile_name)
+        profile_id = profile["id"]
+        likes = profile.get("likes", [])
 
-    camis = restaurant_row.get("camis") or restaurant_row.get("restaurant_id")
-    restaurant_id = str(
-        restaurant_row.get("restaurant_id")
-        or restaurant_row.get("camis")
-        or restaurant_row.get("g_place_id")
-        or restaurant_row.get("dba")
-    )
-    camis_text = str(camis).strip() if camis is not None and str(camis).strip() else ""
-
-    new_likes = [
-        item for item in likes
-        if not (
-            str(item.get("restaurant_id")) == restaurant_id
-            or (camis_text and str(item.get("camis", "")).strip() == camis_text)
+        camis = restaurant_row.get("camis") or restaurant_row.get("restaurant_id")
+        restaurant_id = str(
+            restaurant_row.get("restaurant_id")
+            or restaurant_row.get("camis")
+            or restaurant_row.get("g_place_id")
+            or restaurant_row.get("dba")
         )
-    ]
-    
-    if len(new_likes) == len(likes):
-        return False
-        
-    profile["likes"] = new_likes
-    profile["updated_at"] = _now_iso()
-    profiles[profile_id] = profile
-    save_profiles(profiles)
+        camis_text = str(camis).strip() if camis is not None and str(camis).strip() else ""
+
+        new_likes = [
+            item for item in likes
+            if not (
+                str(item.get("restaurant_id")) == restaurant_id
+                or (camis_text and str(item.get("camis", "")).strip() == camis_text)
+            )
+        ]
+
+        if len(new_likes) == len(likes):
+            return False
+
+        profile["likes"] = new_likes
+        profile["updated_at"] = _now_iso()
+        profiles[profile_id] = profile
+        save_profiles(profiles)
     st.session_state["user_history"] = profile_to_user_history(profile)
     return True
